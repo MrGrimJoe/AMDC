@@ -1,11 +1,18 @@
 # AMDC-1: Adaptive Multi-Model Data Compression
 
-Lossless compressor: reversible transforms + 10 hashed context models + match model, mixed bitwise by two logistic
+Two lossless codecs in one repo.
+
+* **`amdc1`: maximum ratio** (context mixing), ~0.5 MB/s. Spec: `docs/AMDC-1_Specification_v1.2.md`.
+* **`amdcf`: maximum decode speed** (LZ4-compatible LZ77), ~2-4 GB/s per core, with a RAM page codec and compressed page cache. See `docs/AMDC-F_Fast_Mode.md` (including what it cannot do for Windows).
+
+`amdc1` details: lossless compressor: reversible transforms + 10 hashed context models + match model, mixed bitwise by two logistic
 mixers, refined by an APM stage and coded with a 16-bit-probability binary arithmetic coder. C++17, no dependencies. Spec: `docs/AMDC-1_Specification_v1.2.md`.
 
 ```
-make                      # builds build/amdc1 and build/test_amdc1
-make test                 # 146 unit checks + C++/Python byte-identity cross-check
+make                      # builds amdc1, amdcf and both test programs
+make test                 # 146 + 1378 unit checks, C++/Python byte-identity cross-check
+make sanitize             # fast codec under ASan/UBSan, incl. 200k-mutation decoder fuzz
+make windows              # amdcf.exe / amdc1.exe / test_fast.exe via MinGW-w64
 build/amdc1 compress   [-b BYTES] [-l 0|1|2] [-j N] [--verify] IN OUT
 build/amdc1 decompress [--max-output BYTES] [-j N] IN OUT
 python3 bench/bench.py [DIR ...]   # vs gzip / bzip2 / xz / zstd / brotli (zstd, brotli via `pip install zstandard brotli`)

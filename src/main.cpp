@@ -1,3 +1,7 @@
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -43,6 +47,10 @@ static int usage() {
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    _setmode(_fileno(stdin), _O_BINARY);    // '-' must be byte-exact: no CRLF translation
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
     if (argc < 4) return usage();
     std::string cmd = argv[1];
     size_t bs = amdc1::kDefaultBlock;
