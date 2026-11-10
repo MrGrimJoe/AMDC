@@ -62,7 +62,9 @@ static void test_codec() {
     Bytes r = rand_bytes(6000);
     CHECK(rt(r).size() <= r.size() + 20);                     // raw fallback bounds expansion (17 B framing)
 
-    CHECK(rt(Bytes(50000, 0), kDefaultBlock, 0).size() < 600);
+    CHECK(rt(Bytes(50000, 0), kDefaultBlock, 0).size() < 100);
+    CHECK(rt(Bytes(size_t(1) << 20, 0), kDefaultBlock, 0).size() < 300);     // legit extreme ratio passes the decoder guard
+    CHECK(rt(Bytes(size_t(1) << 20, 0xFF), kDefaultBlock, 0).size() < 300);
     std::string t; for (int i = 0; i < 200; ++i) t += "the quick brown fox jumps over the lazy dog. ";
     CHECK(rt(str(t)).size() < t.size() / 20);
 
@@ -104,11 +106,12 @@ static void test_malformed() {
     for (size_t cut : {size_t(0), size_t(3), size_t(8), blob.size() - 1}) CHECK(throws(Bytes(blob.begin(), blob.begin() + cut)));
     Bytes g = blob; g.push_back('x'); CHECK(throws(g));
     Bytes m = blob; m[0] = 'N'; CHECK(throws(m));
-    Bytes huge = {'A', 'M', 'D', 'C', 1, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 1, 1, 1, 0, 0, 0, 0, 0};
+    Bytes old = blob; old[4] = 1; CHECK(throws(old));                       // unsupported version
+    Bytes huge = {'A', 'M', 'D', 'C', 2, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 1, 1, 1, 0, 0, 0, 0, 0};
     CHECK(throws(huge));
     CHECK(throws(blob, 10));
     // implausible expansion: tiny payload claiming a 100 MB block must be refused before any allocation
-    Bytes bomb = {'A', 'M', 'D', 'C', 1};
+    Bytes bomb = {'A', 'M', 'D', 'C', 2};
     uint64_t n = 100000000;
     Bytes body;
     auto vi = [&](Bytes& o, uint64_t v) { while (v >= 0x80) { o.push_back(uint8_t(v | 0x80)); v >>= 7; } o.push_back(uint8_t(v)); };

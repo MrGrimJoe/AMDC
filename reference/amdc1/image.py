@@ -4,7 +4,7 @@ Pixel-exact AND byte-exact: the header bytes and any trailing bytes are carried
 through verbatim, so the original file is reproduced exactly.
 
 Deviation from spec v1.0: YCoCg-R needs a 9-bit residual alphabet, which does not
-fit the byte-oriented coder. v1.1 uses the modular "subtract green" transform
+fit the byte-oriented coder. v1.2 uses the modular "subtract green" transform
 (G, R-G mod 256, B-G mod 256) and MED prediction with mod-256 residuals folded to
 bytes. A 16-bit-symbol YCoCg-R path is left for a later format version.
 """

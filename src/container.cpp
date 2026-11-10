@@ -1,4 +1,4 @@
-// AMDC-1 container (spec v1.1 section 9). Format-identical to reference/amdc1/container.py.
+// AMDC-1 container (spec v1.2 section 7). Format-identical to reference/amdc1/container.py.
 #include <algorithm>
 #include <atomic>
 #include <cstring>
@@ -11,10 +11,10 @@ namespace amdc1 {
 namespace {
 
 constexpr uint8_t MAGIC[4] = {'A', 'M', 'D', 'C'};
-constexpr uint8_t VERSION = 1;
+constexpr uint8_t VERSION = 2;
 constexpr uint64_t MAX_BLOCK = uint64_t(1) << 28;
 constexpr uint64_t MAX_STRIDE = uint64_t(1) << 24;
-constexpr uint64_t MAX_RATIO = 4096;
+constexpr uint64_t MAX_RATIO = 16384;
 constexpr size_t SAMPLE = 12288;
 
 struct Cand { int xf; uint32_t k; uint32_t s; };

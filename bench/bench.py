@@ -5,7 +5,7 @@ usage: bench.py [DIR ...]      # no DIR: use a deterministic synthetic + system-
 Reports total archive size (headers included), wall time, and byte-exact round-trip status.
 Competitors run at their strongest standard settings; AMDC is shown at level 1 and level 2.
 """
-import json, os, random, shutil, struct, subprocess, sys, tempfile, time, glob
+import glob, os, random, resource, shutil, struct, subprocess, sys, tempfile, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(ROOT, "build", "amdc1")
@@ -42,6 +42,31 @@ def synth(d):
     return sorted(out)
 
 
+def py_codecs():
+    out = []
+    try:
+        import zstandard
+        out.append(("zstd-22", lambda b: zstandard.ZstdCompressor(level=22).compress(b)))
+    except ImportError:
+        pass
+    try:
+        import brotli
+        out.append(("brotli-11", lambda b: brotli.compress(b, quality=11, lgwin=24)))
+    except ImportError:
+        pass
+    return out
+
+
+def run_rss(cmd):
+    """Run cmd, return (seconds, peak RSS in MiB of the child)."""
+    t = time.time()
+    before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    subprocess.run(cmd, stderr=subprocess.DEVNULL, check=True)
+    dt = time.time() - t
+    after = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    return dt, max(after, before) / 1024.0
+
+
 def run(cmd, data=None, path=None):
     t = time.time()
     p = subprocess.run(cmd + ([path] if path else []), input=data, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -57,7 +82,9 @@ def main():
     else:
         files = [os.path.join(tmp, n) for n in synth(tmp)]
     avail = [(n, c) for n, c, _ in CODECS if shutil.which(c[0])]
-    cols = [n for n, _ in avail] + ["amdc1-L1", "amdc1-L2"]
+    pyc = [(n, f) for n, f in py_codecs() if n.split("-")[0] not in {a.split("-")[0] for a, _ in avail}]
+    cols = [n for n, _ in avail] + [n for n, _ in pyc] + ["amdc1-L1", "amdc1-L2"]
+    rss_peak = 0.0
     print("%-16s %9s " % ("file", "bytes") + " ".join("%10s" % c for c in cols))
     tot = {c: 0 for c in cols}; tt = {c: 0.0 for c in cols}; total = 0; allok = True
     for f in files:
@@ -65,12 +92,14 @@ def main():
         row = []
         for n, c in avail:
             o, dt = run(c, raw); tot[n] += len(o); tt[n] += dt; row.append(len(o))
+        for n, fn in pyc:
+            t = time.time(); o = fn(raw); tt[n] += time.time() - t; tot[n] += len(o); row.append(len(o))
         for lvl in (1, 2):
             a = os.path.join(tmp, "x.amdc"); b = os.path.join(tmp, "x.out")
-            t = time.time()
-            subprocess.run([BIN, "compress", "-l", str(lvl), f, a], stderr=subprocess.DEVNULL, check=True)
-            dt = time.time() - t
-            subprocess.run([BIN, "decompress", a, b], check=True)
+            dt, rss = run_rss([BIN, "compress", "-l", str(lvl), "-j", "1", f, a])
+            rss_peak = max(rss_peak, rss)
+            _, rss = run_rss([BIN, "decompress", "-j", "1", a, b])
+            rss_peak = max(rss_peak, rss)
             ok = open(b, "rb").read() == raw; allok &= ok
             sz = os.path.getsize(a); n = "amdc1-L%d" % lvl
             tot[n] += sz; tt[n] += dt; row.append(sz if ok else -1)
@@ -79,6 +108,7 @@ def main():
     print("%-16s %9d " % ("TOTAL", total) + " ".join("%10d" % tot[c] for c in cols))
     print("%-16s %9s " % ("ratio", "") + " ".join("%9.2f%%" % (100.0 * tot[c] / total) for c in cols))
     print("%-16s %9s " % ("time (s)", "") + " ".join("%10.2f" % tt[c] for c in cols))
+    print("amdc1 peak RSS (single thread, 1 MiB blocks): %.0f MiB" % rss_peak)
     print("round-trip: %s" % ("ALL EXACT" if allok else "FAILURES"))
     shutil.rmtree(tmp)
 

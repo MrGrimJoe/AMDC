@@ -11,11 +11,24 @@ namespace {
 
 constexpr uint64_t K64 = 0x9E3779B97F4A7C15ull;
 constexpr uint64_t KB = 0x9E3779B1ull;
-constexpr int NM = 8;
+constexpr int NM = 10;
 constexpr int NIN = NM + 2;
-constexpr int LIMS[NM] = {250, 250, 250, 120, 60, 60, 120, 120};
+constexpr int LIMS[NM] = {250, 250, 250, 120, 60, 60, 120, 120, 60, 120};
+constexpr int INITW = 9800;
 constexpr int LR = 12;
 constexpr size_t MINM = 5;
+
+// Ablation switches for experiments only (see tools/ablate.sh). Any non-default value makes archives
+// incompatible with the standard format.  AMDC_ABLATE_MASK: bit i zeroes context model i (bit NM = match model).
+#ifndef AMDC_ABLATE_MASK
+#define AMDC_ABLATE_MASK 0
+#endif
+#ifndef AMDC_NO_APM
+#define AMDC_NO_APM 0
+#endif
+#ifndef AMDC_NO_MIX2
+#define AMDC_NO_MIX2 0
+#endif
 
 struct Tables {
     int sq[4096];  // index d+2048
@@ -55,18 +68,23 @@ Bytes run(size_t n, uint32_t s, const uint8_t* in, const uint8_t* pay, size_t pl
     const int mb = std::min(22, std::max(12, bitlen(n) + 1));
     const int msh = 64 - mb;
 
-    std::array<std::vector<uint16_t>, NM> P;
-    std::array<std::vector<uint8_t>, NM> C;
-    for (int i = 0; i < NM; ++i) {
-        P[i].assign(size_t(1) << tb, 32768);
-        C[i].assign(size_t(1) << tb, 0);
-    }
+    // One 32-bit cell per slot: probability in the low 16 bits, adaptation count above (one cache miss, not two).
+    std::array<std::vector<uint32_t>, NM> S;
+    for (int i = 0; i < NM; ++i) S[i].assign(size_t(1) << tb, 32768u);
     std::vector<uint32_t> MT(size_t(1) << mb, 0);
     std::vector<int64_t> W(size_t(512) * NIN);
     for (size_t i = 0; i < 512; ++i) {
-        for (int k = 0; k < NM + 1; ++k) W[i * NIN + k] = 13107;
+        for (int k = 0; k < NM + 1; ++k) W[i * NIN + k] = INITW;
         W[i * NIN + NM + 1] = 0;
     }
+    std::vector<int64_t> W2(size_t(256) * NIN);
+    for (size_t i = 0; i < 256; ++i) {
+        for (int k = 0; k < NM + 1; ++k) W2[i * NIN + k] = INITW;
+        W2[i * NIN + NM + 1] = 0;
+    }
+    std::vector<uint16_t> A(size_t(65536) * 33);
+    for (size_t i = 0; i < 65536; ++i)
+        for (int j = 0; j < 33; ++j) A[i * 33 + j] = uint16_t(std::min(65535, TB.squash((j - 16) * 128) * 16));
     int MP[33];
     for (int& v : MP) v = 49152;
 
@@ -117,7 +135,7 @@ Bytes run(size_t n, uint32_t s, const uint8_t* in, const uint8_t* pay, size_t pl
             cx7 = (c8 >> 8) & 0xFFFF;
         }
         const uint64_t ctxs[NM] = {0, c1, c8 & 0xFFFF, c8 & 0xFFFFFF, c8 & 0xFFFFFFFFull,
-                                   c8 & 0xFFFFFFFFFFFFull, cx6, cx7};
+                                   c8 & 0xFFFFFFFFFFFFull, cx6, cx7, c8, (c8 & 0xFF) | ((c8 >> 8) & 0xFF00)};
         uint64_t bases[NM];
         for (int i = 0; i < NM; ++i) bases[i] = ((ctxs[i] + 1 + uint64_t(i) * 0x10001) * K64) >> sh;
 
@@ -128,7 +146,7 @@ Bytes run(size_t n, uint32_t s, const uint8_t* in, const uint8_t* pay, size_t pl
             int xs[NIN];
             for (int i = 0; i < NM; ++i) {
                 idx[i] = (bases[i] + uint64_t(c0) * KB) & mask;
-                xs[i] = TB.st[P[i][idx[i]] >> 4];
+                xs[i] = TB.st[(S[i][idx[i]] & 0xFFFF) >> 4];
             }
             int flag = 0, eb = 0, mi = 0;
             if (mlen && (uint32_t(pb | 256) >> (bp + 1)) == c0) {
@@ -141,16 +159,29 @@ Bytes run(size_t n, uint32_t s, const uint8_t* in, const uint8_t* pay, size_t pl
                 xs[NM] = 0;
             }
             xs[NM + 1] = 256;
+            if (AMDC_ABLATE_MASK)
+                for (int i = 0; i <= NM; ++i)
+                    if ((AMDC_ABLATE_MASK >> i) & 1) xs[i] = 0;
             int64_t* w = &W[size_t(c0 * 2 + flag) * NIN];
-            int64_t dot = 0;
-            for (int k = 0; k < NIN; ++k) dot += w[k] * xs[k];
+            int64_t* w2 = &W2[size_t(c1) * NIN];
+            int64_t dot = 0, dot2 = 0;
+            for (int k = 0; k < NIN; ++k) { dot += w[k] * xs[k]; dot2 += w2[k] * xs[k]; }
             dot >>= 16;
-            if (dot > 2047) dot = 2047;
-            else if (dot < -2047) dot = -2047;
-            int p = TB.sq[dot + 2048];
-            if (p < 1) p = 1;
+            dot2 >>= 16;
+            if (dot > 2047) dot = 2047; else if (dot < -2047) dot = -2047;
+            if (dot2 > 2047) dot2 = 2047; else if (dot2 < -2047) dot2 = -2047;
+            if (AMDC_NO_MIX2) dot2 = dot;
+            int p1 = TB.sq[dot + 2048], p2 = TB.sq[dot2 + 2048];
+            const int64_t dm = (dot + dot2) >> 1;
+            int pm = TB.sq[dm + 2048];
+            const int av = int(dm + 2048), aw = av & 127;
+            uint16_t* ap = &A[(size_t(c1) << 8 | c0) * 33 + (av >> 7)];
+            int pa = (ap[0] * (128 - aw) + ap[1] * aw) >> 7;           // 16-bit
+            int p = AMDC_NO_APM ? pm * 16 : (pm * 16 + 3 * pa + 2) >> 2;                        // 16-bit probability of a 1
+            if (p < 4) p = 4;
+            if (p > 65532) p = 65532;
 
-            uint32_t xmid = x1 + uint32_t(((x2 - x1) >> 12) * uint32_t(p));
+            uint32_t xmid = x1 + uint32_t((uint64_t(x2 - x1) * uint64_t(p)) >> 16);
             int bit;
             if (ENC) bit = (byte_in >> bp) & 1;
             else bit = x <= xmid ? 1 : 0;
@@ -167,13 +198,23 @@ Bytes run(size_t n, uint32_t s, const uint8_t* in, const uint8_t* pay, size_t pl
                 x2 = (x2 << 8) | 255u;
             }
 
-            const int64_t err = int64_t((bit << 12) - p) * LR;
-            for (int k = 0; k < NIN; ++k) w[k] += (int64_t(xs[k]) * err) >> 14;
+            const int64_t err = int64_t((bit << 12) - p1) * LR;
+            const int64_t err2 = int64_t((bit << 12) - p2) * LR;
+            for (int k = 0; k < NIN; ++k) {
+                w[k] += (int64_t(xs[k]) * err) >> 14;
+                w2[k] += (int64_t(xs[k]) * err2) >> 14;
+            }
             for (int i = 0; i < NM; ++i) {
-                uint8_t& cn = C[i][idx[i]];
-                uint16_t& pp = P[i][idx[i]];
-                pp = uint16_t(int(pp) + ((((bit << 16) - int(pp)) * TB.recip[cn]) >> 16));
-                if (cn < LIMS[i]) ++cn;
+                uint32_t& cell = S[i][idx[i]];
+                const int pp = int(cell & 0xFFFF);
+                const uint32_t cn = cell >> 16;
+                const int np = pp + ((((bit << 16) - pp) * TB.recip[cn]) >> 16);
+                cell = uint32_t(np) | ((cn < uint32_t(LIMS[i]) ? cn + 1 : cn) << 16);
+            }
+            {
+                const int tgt = bit ? 65535 : 0, rnd = bit ? 63 : 0;
+                ap[0] = uint16_t(ap[0] + ((tgt - int(ap[0]) + rnd) >> 6));
+                ap[1] = uint16_t(ap[1] + ((tgt - int(ap[1]) + rnd) >> 6));
             }
             if (flag) MP[mi] += (((bit == eb ? 1 : 0) << 16) - MP[mi]) >> 6;
             c0 = (c0 << 1) | uint32_t(bit);

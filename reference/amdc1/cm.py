@@ -10,9 +10,10 @@ M64 = (1 << 64) - 1
 K64 = 0x9E3779B97F4A7C15
 KB = 0x9E3779B1
 
-NM = 8                     # hashed context models
+NM = 10                    # hashed context models
 NIN = NM + 2               # + match model + bias
-LIM = (250, 250, 250, 120, 60, 60, 120, 120)   # adaptation-count limits
+LIM = (250, 250, 250, 120, 60, 60, 120, 120, 60, 120)   # adaptation-count limits
+INITW = 9800               # initial mixer weight (65536 = 1.0)
 LR = 12                    # mixer learning rate (eta = LR/1024), tuned on text/json/float corpus
 MINM = 5                   # minimum verified match length
 
@@ -56,7 +57,12 @@ def _run(n, s, data, payload):
     P = [array('H', [32768]) * (1 << tb) for _ in range(NM)]
     C = [array('B', bytes(1 << tb)) for _ in range(NM)]
     MT = array('I', [0]) * (1 << mb)
-    W = [[13107] * (NM + 1) + [0] for _ in range(512)]
+    W = [[INITW] * (NM + 1) + [0] for _ in range(512)]
+    W2 = [[INITW] * (NM + 1) + [0] for _ in range(256)]
+    A = array('H', [0]) * (65536 * 33)
+    row = [min(65535, _squash((j - 16) * 128) * 16) for j in range(33)]
+    for i in range(65536):
+        A[i * 33:(i + 1) * 33] = array('H', row)
     MP = [49152] * 33
     buf = bytearray(data) if enc else bytearray(n)
     out = bytearray()
@@ -104,7 +110,7 @@ def _run(n, s, data, payload):
             cx6 = ((wh << 8) | c1) if wh else (c1 | 0x1000000000)
             cx7 = (c8 >> 8) & 0xFFFF
         ctxs = (0, c1, c8 & 0xFFFF, c8 & 0xFFFFFF, c8 & 0xFFFFFFFF,
-                c8 & 0xFFFFFFFFFFFF, cx6, cx7)
+                c8 & 0xFFFFFFFFFFFF, cx6, cx7, c8, c1 | ((c8 >> 8) & 0xFF00))
         bases = [((((cx + 1 + i * 0x10001) * K64) & M64) >> sh)
                  for i, cx in enumerate(ctxs)]
         c0 = 1
@@ -124,16 +130,32 @@ def _run(n, s, data, payload):
             xs.append(256)
             wi = c0 * 2 + flag
             w = W[wi]
+            w2 = W2[c1]
             dot = sum(p_ * q_ for p_, q_ in zip(w, xs)) >> 16
+            dot2 = sum(p_ * q_ for p_, q_ in zip(w2, xs)) >> 16
             if dot > 2047:
                 dot = 2047
             elif dot < -2047:
                 dot = -2047
-            p = sq[dot + 2048]
-            if p < 1:
-                p = 1
+            if dot2 > 2047:
+                dot2 = 2047
+            elif dot2 < -2047:
+                dot2 = -2047
+            p1 = sq[dot + 2048]
+            p2 = sq[dot2 + 2048]
+            dm = (dot + dot2) >> 1
+            pm = sq[dm + 2048]
+            av = dm + 2048
+            aw = av & 127
+            ai = ((c1 << 8) | c0) * 33 + (av >> 7)
+            pa = (A[ai] * (128 - aw) + A[ai + 1] * aw) >> 7
+            p = (pm * 16 + 3 * pa + 2) >> 2
+            if p < 4:
+                p = 4
+            elif p > 65532:
+                p = 65532
             # ---- arithmetic coder
-            xmid = x1 + ((x2 - x1) >> 12) * p
+            xmid = x1 + (((x2 - x1) * p) >> 16)
             if enc:
                 bit = (byte >> bp) & 1
             else:
@@ -152,14 +174,19 @@ def _run(n, s, data, payload):
                 x1 = (x1 << 8) & M32
                 x2 = ((x2 << 8) & M32) | 255
             # ---- updates
-            err = ((bit << 12) - p) * LR
+            err = ((bit << 12) - p1) * LR
+            err2 = ((bit << 12) - p2) * LR
             W[wi] = [wv + ((xv * err) >> 14) for wv, xv in zip(w, xs)]
+            W2[c1] = [wv + ((xv * err2) >> 14) for wv, xv in zip(w2, xs)]
             for Pm, Cm, j, lm in zip(P, C, idx, lim):
                 nn = Cm[j]
                 pp = Pm[j]
                 Pm[j] = pp + ((((bit << 16) - pp) * recip[nn]) >> 16)
                 if nn < lm:
                     Cm[j] = nn + 1
+            tgt, rnd = (65535, 63) if bit else (0, 0)
+            A[ai] += (tgt - A[ai] + rnd) >> 6
+            A[ai + 1] += (tgt - A[ai + 1] + rnd) >> 6
             if flag:
                 MP[mi] += (((1 if bit == eb else 0) << 16) - MP[mi]) >> 6
             c0 = (c0 << 1) | bit

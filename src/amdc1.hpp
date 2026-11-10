@@ -1,4 +1,4 @@
-// AMDC-1 v1.1 -- adaptive multi-model lossless compression (C++17 reference implementation)
+// AMDC-1 v1.2 (format version 2) -- adaptive multi-model lossless compression (C++17 reference implementation)
 #pragma once
 #include <cstddef>
 #include <cstdint>

@@ -1,5 +1,5 @@
 CXX      ?= g++
-CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -pthread
+CXXFLAGS ?= -std=c++17 -O3 -Wall -Wextra -pthread
 SRC      := src/cm.cpp src/transforms.cpp src/container.cpp
 BIN      := build/amdc1
 
