@@ -11,16 +11,46 @@ namespace amdc1 {
 namespace {
 
 constexpr uint8_t MAGIC[4] = {'A', 'M', 'D', 'C'};
-constexpr uint8_t VERSION = 2;
+constexpr uint8_t VERSION = 3;
 constexpr uint64_t MAX_BLOCK = uint64_t(1) << 28;
 constexpr uint64_t MAX_STRIDE = uint64_t(1) << 24;
 constexpr uint64_t MAX_RATIO = 16384;
+uint8_t cfg_byte(const CmCfg& c) { return uint8_t(c.lite | ((c.membits - kMinMemBits) << 1)); }
 constexpr size_t SAMPLE = 12288;
 
 struct Cand { int xf; uint32_t k; uint32_t s; };
 const Cand CANDS[] = {{0, 0, 0}, {0, 0, 2}, {0, 0, 4}, {1, 1, 1}, {1, 2, 2},
-                      {1, 4, 4}, {2, 1, 1}, {2, 4, 4}, {3, 2, 0}, {3, 4, 0}};
+                      {1, 4, 4}, {2, 1, 1}, {2, 4, 4}, {3, 2, 0}, {3, 4, 0}, {5, 0, 0}};
 constexpr int NCANDS = int(sizeof(CANDS) / sizeof(CANDS[0]));
+
+// Record/row length detection (encoder-side heuristic only; the chosen stride is stored in the stream).
+// Returns up to two strides > 4: the best byte-equality lag and the best small-difference lag.
+std::vector<uint32_t> detect_strides(const uint8_t* d, size_t n) {
+    constexpr size_t W = 32768, SMAX = 4096;
+    std::vector<uint32_t> out;
+    if (n < 4 * 64) return out;
+    size_t len = std::min(n, W + SMAX);
+    const uint8_t* p = d + (n - len) / 2;
+    size_t smax = std::min(SMAX, len / 8);
+    uint64_t best_eq = 0, best_sad = ~uint64_t(0);
+    uint32_t s_eq = 0, s_sad = 0;
+    uint64_t sum_eq = 0;
+    for (size_t s = 5; s <= smax; ++s) {
+        uint64_t eq = 0, sad = 0;
+        for (size_t i = smax; i < len; ++i) {
+            int df = int(p[i]) - int(p[i - s]);
+            eq += df == 0;
+            sad += uint64_t(df < 0 ? -df : df);
+        }
+        sum_eq += eq;
+        if (eq > best_eq) { best_eq = eq; s_eq = uint32_t(s); }
+        if (sad < best_sad) { best_sad = sad; s_sad = uint32_t(s); }
+    }
+    const uint64_t cnt = smax >= 5 ? smax - 4 : 1, mean_eq = sum_eq / cnt;
+    if (s_eq && best_eq > mean_eq * 3 / 2 + 64) out.push_back(s_eq);
+    if (s_sad && s_sad != s_eq) out.push_back(s_sad);
+    return out;
+}
 
 void put_varint(Bytes& o, uint64_t v) {
     while (v >= 0x80) { o.push_back(uint8_t(v | 0x80)); v >>= 7; }
@@ -46,19 +76,31 @@ Bytes raw_record(const uint8_t* d, size_t n) {
     return r;
 }
 
-Bytes cm_record(size_t raw_len, int xf, const std::vector<uint64_t>& params, uint32_t s, const Bytes& payload) {
+Bytes cm_record(size_t raw_len, int xf, const std::vector<uint64_t>& params, uint32_t s, const CmCfg& cfg, const Bytes& payload) {
     Bytes r{1};
     put_varint(r, raw_len);
     r.push_back(uint8_t(xf));
     for (uint64_t p : params) put_varint(r, p);
     put_varint(r, s);
+    r.push_back(cfg_byte(cfg));
     put_varint(r, payload.size());
     r.insert(r.end(), payload.begin(), payload.end());
     return r;
 }
 
 std::vector<uint64_t> xf_params(const Cand& c) {
-    return c.xf ? std::vector<uint64_t>{c.k} : std::vector<uint64_t>{};
+    return (c.xf >= 1 && c.xf <= 3) ? std::vector<uint64_t>{c.k} : std::vector<uint64_t>{};
+}
+
+// Encoder-side heuristic for level 0 (no search): x86 machine code has E8/E9 opcodes followed by a rel32 whose top
+// byte is 00/FF at a rate of roughly 0.3-1% of positions; random or text data stays below 0.02%.
+bool looks_like_x86(const uint8_t* d, size_t n) {
+    size_t len = std::min<size_t>(n, 1 << 16);
+    const uint8_t* p = d + (n - len) / 2;
+    size_t hits = 0;
+    for (size_t i = 0; i + 4 < len; ++i)
+        if ((p[i] == 0xE8 || p[i] == 0xE9) && (p[i + 4] == 0x00 || p[i + 4] == 0xFF)) ++hits;
+    return len > 4096 && hits * 1000 >= len * 2;   // >= 0.2%
 }
 
 Bytes make_sample(const uint8_t* d, size_t n) {
@@ -70,19 +112,28 @@ Bytes make_sample(const uint8_t* d, size_t n) {
     return s;
 }
 
-Bytes encode_cand(const uint8_t* d, size_t n, const Cand& c) {
+Bytes encode_cand(const uint8_t* d, size_t n, const Cand& c, const CmCfg& cfg) {
     Bytes t = xf_apply(c.xf, c.k, d, n);
-    return cm_record(n, c.xf, xf_params(c), c.s, cm_encode(t.data(), n, c.s));
+    return cm_record(n, c.xf, xf_params(c), c.s, cfg, cm_encode(t.data(), n, c.s, cfg));
 }
 
-Bytes encode_block(const uint8_t* d, size_t n, int level) {
+Bytes encode_block(const uint8_t* d, size_t n, int level, int membits) {
+    const CmCfg cfg{uint8_t(level == 0 ? 1 : 0), uint8_t(membits)};
     Bytes raw = raw_record(d, n);
     if (n == 0) return raw;
-    int nc = level == 0 ? 1 : NCANDS;
+    std::vector<Cand> cands;
+    if (level == 0) {
+        cands.push_back(looks_like_x86(d, n) ? Cand{5, 0, 0} : CANDS[0]);
+    } else {
+        cands.assign(CANDS, CANDS + NCANDS);
+        if (n > SAMPLE)
+            for (uint32_t st : detect_strides(d, n)) cands.push_back({0, 0, st});
+    }
+    const int nc = int(cands.size());
     Bytes best;
     if (level >= 2 || n <= SAMPLE) {
         for (int i = 0; i < nc; ++i) {
-            Bytes rec = encode_cand(d, n, CANDS[i]);
+            Bytes rec = encode_cand(d, n, cands[i], cfg);
             if (best.empty() || rec.size() < best.size()) best = std::move(rec);
         }
     } else {
@@ -90,17 +141,18 @@ Bytes encode_block(const uint8_t* d, size_t n, int level) {
         size_t bs = 0;
         int bi = -1;
         for (int i = 0; i < nc; ++i) {
-            Bytes t = xf_apply(CANDS[i].xf, CANDS[i].k, smp.data(), smp.size());
-            size_t sc = cm_encode(t.data(), t.size(), CANDS[i].s).size();
+            Bytes t = xf_apply(cands[i].xf, cands[i].k, smp.data(), smp.size());
+            size_t sc = cm_encode(t.data(), t.size(), cands[i].s, cfg).size();
             if (bi < 0 || sc < bs) { bs = sc; bi = i; }
         }
         if (bs >= smp.size()) return raw;
-        best = encode_cand(d, n, CANDS[bi]);
+        best = encode_cand(d, n, cands[bi], cfg);
     }
     return best.size() < raw.size() ? best : raw;
 }
 
-bool image_record(const uint8_t* d, size_t n, int level, Bytes& rec) {
+bool image_record(const uint8_t* d, size_t n, int level, int membits, Bytes& rec) {
+    const CmCfg cfg{uint8_t(level == 0 ? 1 : 0), uint8_t(membits)};
     PnmInfo pi;
     if (!parse_pnm(d, n, pi)) return false;
     uint32_t s = uint32_t(std::min<uint64_t>(pi.w, MAX_STRIDE));
@@ -110,8 +162,8 @@ bool image_record(const uint8_t* d, size_t n, int level, Bytes& rec) {
     bool have = false;
     for (int ct : cts) {
         Bytes y = image_fwd(d, n, pi, ct);
-        Bytes r = cm_record(n, XF_IMAGE, {pi.hdr, pi.w, pi.h, pi.ch, uint64_t(ct)}, s,
-                            cm_encode(y.data(), n, s));
+        Bytes r = cm_record(n, XF_IMAGE, {pi.hdr, pi.w, pi.h, pi.ch, uint64_t(ct)}, s, cfg,
+                            cm_encode(y.data(), n, s, cfg));
         if (!have || r.size() < rec.size()) { rec = std::move(r); have = true; }
     }
     return have;
@@ -145,6 +197,7 @@ struct Rec {
     int xf = 0;
     uint64_t params[5] = {0, 0, 0, 0, 0};
     uint64_t s = 0;
+    CmCfg cfg;
     size_t pay = 0, plen = 0;
 };
 
@@ -165,8 +218,9 @@ uint32_t crc32(const uint8_t* p, size_t n) {
     return c ^ 0xFFFFFFFFu;
 }
 
-Bytes compress(const Bytes& in, size_t block_size, int level, unsigned threads) {
+Bytes compress(const Bytes& in, size_t block_size, int level, unsigned threads, int membits) {
     if (block_size < 1 || block_size > MAX_BLOCK) throw std::invalid_argument("block_size out of range");
+    if (membits < kMinMemBits || membits > kMaxMemBits) throw std::invalid_argument("membits out of range");
     const size_t n = in.size();
     const uint32_t crc = crc32(in.data(), n);
     auto wrap = [&](uint64_t bs, const std::vector<Bytes>& recs) {
@@ -182,12 +236,12 @@ Bytes compress(const Bytes& in, size_t block_size, int level, unsigned threads) 
     std::vector<Bytes> recs(nb);
     parallel_for(nb, threads, [&](size_t i) {
         size_t off = i * block_size;
-        recs[i] = encode_block(in.data() + off, std::min(block_size, n - off), level);
+        recs[i] = encode_block(in.data() + off, std::min(block_size, n - off), level, membits);
     });
     Bytes best = wrap(block_size, recs);
     if (n <= MAX_BLOCK) {
         Bytes rec;
-        if (image_record(in.data(), n, level, rec)) {
+        if (image_record(in.data(), n, level, membits, rec)) {
             Bytes raw = raw_record(in.data(), n);
             Bytes cand = wrap(std::max<size_t>(n, 1), {rec.size() < raw.size() ? rec : raw});
             if (cand.size() < best.size()) best = std::move(cand);
@@ -225,10 +279,15 @@ Bytes decompress(const Bytes& in, uint64_t max_output, unsigned threads) {
         } else if (r.method == 1) {
             if (pos >= end) throw FormatError("truncated");
             r.xf = b[pos++];
-            if (r.xf > 4) throw FormatError("unknown transform");
+            if (r.xf > 5) throw FormatError("unknown transform");
             int cnt = (r.xf >= 1 && r.xf <= 3) ? 1 : r.xf == 4 ? 5 : 0;
             for (int i = 0; i < cnt; ++i) r.params[i] = get_varint(b, end, pos);
             r.s = get_varint(b, end, pos);
+            if (pos >= end) throw FormatError("truncated");
+            const uint8_t cb = b[pos++];
+            r.cfg.lite = cb & 1;
+            r.cfg.membits = uint8_t(kMinMemBits + (cb >> 1));
+            if ((cb >> 1) > kMaxMemBits - kMinMemBits) throw FormatError("bad model configuration");
             uint64_t plen = get_varint(b, end, pos);
             if (r.s > MAX_STRIDE || plen > end - pos) throw FormatError("bad block header");
             if (r.n > (plen + 8) * MAX_RATIO) throw FormatError("implausible expansion ratio");
@@ -259,7 +318,7 @@ Bytes decompress(const Bytes& in, uint64_t max_output, unsigned threads) {
             std::memcpy(dst, b + r.pay, r.n);
             return;
         }
-        Bytes y = cm_decode(b + r.pay, r.plen, size_t(r.n), uint32_t(r.s));
+        Bytes y = cm_decode(b + r.pay, r.plen, size_t(r.n), uint32_t(r.s), r.cfg);
         Bytes x;
         if (r.xf == XF_IMAGE) {
             PnmInfo pi{size_t(r.params[0]), uint32_t(r.params[1]), uint32_t(r.params[2]), uint32_t(r.params[3])};

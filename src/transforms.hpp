@@ -2,7 +2,7 @@
 #include "amdc1.hpp"
 
 namespace amdc1 {
-enum Xf : uint8_t { XF_ID = 0, XF_DELTA = 1, XF_XOR = 2, XF_SHUFFLE = 3, XF_IMAGE = 4 };
+enum Xf : uint8_t { XF_ID = 0, XF_DELTA = 1, XF_XOR = 2, XF_SHUFFLE = 3, XF_IMAGE = 4, XF_X86 = 5 };
 
 // Length-preserving reversible transforms (spec section 2).
 Bytes xf_apply(int xf, uint32_t k, const uint8_t* d, size_t n);

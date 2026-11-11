@@ -21,6 +21,26 @@ Bytes xf_apply(int xf, uint32_t k, const uint8_t* d, size_t n) {
                 for (size_t i = j; i < m; i += k) o[q++] = d[i];
             break;
         }
+        case XF_X86: {
+            // E8/E9 call/jump targets: relative -> absolute on the low 24 bits.
+            // The top byte (00/FF) is the trigger and is never modified. An opcode that was examined but not converted
+            // blocks conversion for the next 3 positions, so a trigger byte is never rewritten by a later conversion
+            // and both directions make identical decisions.
+            long lf = -10;
+            for (size_t i = 0; i + 4 < n;) {
+                const bool op = d[i] == 0xE8 || d[i] == 0xE9;
+                if (op && long(i) - lf > 3 && (d[i + 4] == 0x00 || d[i + 4] == 0xFF)) {
+                    uint32_t v = uint32_t(d[i + 1]) | uint32_t(d[i + 2]) << 8 | uint32_t(d[i + 3]) << 16;
+                    uint32_t a = (v + uint32_t(i + 5)) & 0xFFFFFFu;
+                    o[i + 1] = uint8_t(a); o[i + 2] = uint8_t(a >> 8); o[i + 3] = uint8_t(a >> 16);
+                    i += 5;
+                } else {
+                    if (op) lf = long(i);
+                    ++i;
+                }
+            }
+            break;
+        }
         default: throw std::invalid_argument("unknown transform");
     }
     return o;
@@ -40,6 +60,26 @@ Bytes xf_invert(int xf, uint32_t k, const uint8_t* d, size_t n) {
             size_t m = n - n % k, q = 0;
             for (size_t j = 0; j < k; ++j)
                 for (size_t i = j; i < m; i += k) o[i] = d[q++];
+            break;
+        }
+        case XF_X86: {
+            // E8/E9 call/jump targets: absolute -> relative on the low 24 bits.
+            // The top byte (00/FF) is the trigger and is never modified. An opcode that was examined but not converted
+            // blocks conversion for the next 3 positions, so a trigger byte is never rewritten by a later conversion
+            // and both directions make identical decisions.
+            long lf = -10;
+            for (size_t i = 0; i + 4 < n;) {
+                const bool op = o[i] == 0xE8 || o[i] == 0xE9;
+                if (op && long(i) - lf > 3 && (o[i + 4] == 0x00 || o[i + 4] == 0xFF)) {
+                    uint32_t v = uint32_t(o[i + 1]) | uint32_t(o[i + 2]) << 8 | uint32_t(o[i + 3]) << 16;
+                    uint32_t a = (v - uint32_t(i + 5)) & 0xFFFFFFu;
+                    o[i + 1] = uint8_t(a); o[i + 2] = uint8_t(a >> 8); o[i + 3] = uint8_t(a >> 16);
+                    i += 5;
+                } else {
+                    if (op) lf = long(i);
+                    ++i;
+                }
+            }
             break;
         }
         default: throw std::invalid_argument("unknown transform");

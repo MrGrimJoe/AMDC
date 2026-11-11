@@ -23,9 +23,10 @@ def main(argv=None):
     c = sub.add_parser("compress", help="compress a file ('-' = stdin/stdout)")
     c.add_argument("input")
     c.add_argument("output")
-    c.add_argument("-b", "--block-size", type=int, default=1 << 20)
+    c.add_argument("-b", "--block-size", type=int, default=16 << 20)
     c.add_argument("-l", "--level", type=int, choices=(0, 1, 2), default=1,
-                   help="0 fixed model, 1 sampled transform search (default), 2 exhaustive")
+                   help="0 lite model (fast), 1 full model + sampled transform search (default), 2 exhaustive")
+    c.add_argument("-m", "--membits", type=int, default=22, help="log2 slots per model table (16..24)")
     c.add_argument("--verify", action="store_true", help="decode and compare after compressing")
     d = sub.add_parser("decompress", help="decompress an archive")
     d.add_argument("input")
@@ -36,7 +37,7 @@ def main(argv=None):
         t = time.time()
         if a.cmd == "compress":
             raw = _read(a.input)
-            blob = compress(raw, a.block_size, a.level)
+            blob = compress(raw, a.block_size, a.level, a.membits)
             if a.verify and decompress(blob) != raw:
                 print("VERIFY FAILED", file=sys.stderr)
                 return 2

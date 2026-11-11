@@ -39,9 +39,10 @@ static void write_all(const std::string& path, const Bytes& d) {
 static int usage() {
     std::fputs(
         "amdc1 - AMDC-1 lossless compressor\n"
-        "  amdc1 compress   [-b BYTES] [-l 0|1|2] [-j N] [--verify] IN OUT\n"
+        "  amdc1 compress   [-b BYTES] [-l 0|1|2] [-m BITS] [-j N] [--verify] IN OUT\n"
         "  amdc1 decompress [--max-output BYTES] [-j N] IN OUT\n"
-        "'-' means stdin/stdout. Levels: 0 fixed model, 1 sampled search (default), 2 exhaustive.\n",
+        "'-' means stdin/stdout. Levels: 0 lite model (fast), 1 full model + sampled search (default), 2 exhaustive.\n"
+        "-m BITS: log2 slots per model table (16..24, default 22). Memory ~ 10 x 4 x 2^BITS bytes (full), half for -l 0.\n",
         stderr);
     return 64;
 }
@@ -54,7 +55,7 @@ int main(int argc, char** argv) {
     if (argc < 4) return usage();
     std::string cmd = argv[1];
     size_t bs = amdc1::kDefaultBlock;
-    int level = 1;
+    int level = 1, membits = amdc1::kDefaultMemBits;
     unsigned jobs = 0;
     uint64_t maxout = uint64_t(1) << 32;
     bool verify = false;
@@ -68,6 +69,7 @@ int main(int argc, char** argv) {
         try {
             if (a == "-b") bs = size_t(val());
             else if (a == "-l") level = int(val());
+            else if (a == "-m") membits = int(val());
             else if (a == "-j") jobs = unsigned(val());
             else if (a == "--max-output") maxout = val();
             else if (a == "--verify") verify = true;
@@ -83,7 +85,7 @@ int main(int argc, char** argv) {
         auto t0 = std::chrono::steady_clock::now();
         Bytes in = read_all(pos[0]);
         if (cmd == "compress") {
-            Bytes out = amdc1::compress(in, bs, level, jobs);
+            Bytes out = amdc1::compress(in, bs, level, jobs, membits);
             if (verify && amdc1::decompress(out, uint64_t(-1), jobs) != in) {
                 std::fputs("VERIFY FAILED\n", stderr);
                 return 2;
