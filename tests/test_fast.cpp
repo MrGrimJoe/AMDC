@@ -1,8 +1,13 @@
 // AMDC-F tests. Exit status 0 = all passed. Run under ASan/UBSan too (make sanitize).
+#include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <random>
 #include <string>
+#include <memory>
+#include <thread>
+#include <vector>
 
 #include "../src/fast.hpp"
 #include "../src/pagecache.hpp"
@@ -26,6 +31,46 @@ static Bytes periodic(size_t n, size_t period) {
     Bytes b(n); Bytes pat = rnd(period);
     for (size_t i = 0; i < n; ++i) b[i] = pat[i % period];
     return b;
+}
+
+static void append_lz4_len(Bytes& b, size_t n) {
+    while (n >= 255) { b.push_back(255); n -= 255; }
+    b.push_back(uint8_t(n));
+}
+
+// Long final matches are the case this regression test targets.
+static void test_tight_match_copy() {
+    for (size_t offset = 2; offset <= 40; ++offset) {
+        for (size_t match_len : {size_t(127), size_t(128), size_t(129), size_t(255), size_t(256), size_t(257), size_t(1024), size_t(4096)}) {
+            for (size_t tail_len : {size_t(5), size_t(15), size_t(32)}) {
+                Bytes enc;
+                const size_t lit_nibble = std::min<size_t>(15, offset);
+                const size_t ml_code = match_len - 4;
+                enc.push_back(uint8_t((lit_nibble << 4) | std::min<size_t>(15, ml_code)));
+                if (offset >= 15) append_lz4_len(enc, offset - 15);
+                for (size_t i = 0; i < offset; ++i) enc.push_back(uint8_t('A' + i));
+                enc.push_back(uint8_t(offset));
+                enc.push_back(uint8_t(offset >> 8));
+                if (ml_code >= 15) append_lz4_len(enc, ml_code - 15);
+                if (tail_len < 15) enc.push_back(uint8_t(tail_len << 4));
+                else {
+                    enc.push_back(0xF0);
+                    append_lz4_len(enc, tail_len - 15);
+                }
+                for (size_t i = 0; i < tail_len; ++i) enc.push_back(uint8_t('x' + (i % 8)));
+
+                Bytes expected;
+                for (size_t i = 0; i < offset; ++i) expected.push_back(uint8_t('A' + i));
+                for (size_t i = 0; i < match_len; ++i)
+                    expected.push_back(expected[expected.size() - offset]);
+                for (size_t i = 0; i < tail_len; ++i) expected.push_back(uint8_t('x' + (i % 8)));
+
+                Bytes out(expected.size());
+                CHECK(block_decompress(enc.data(), enc.size(), out.data(), out.size()));
+                CHECK(out == expected);
+            }
+        }
+    }
 }
 
 static Bytes texty(size_t n) {
@@ -85,6 +130,122 @@ static void test_block_malformed() {
     uint8_t bad[] = {0x10, 'a', 0x05, 0x00, 0x00};
     uint8_t o2[16];
     CHECK(!block_decompress(bad, sizeof bad, o2, 9));
+}
+
+// ---- differential testing against a deliberately naive reference decoder --------------------------------
+static bool ref_decompress(const uint8_t* ip, size_t inlen, Bytes& out, size_t outlen) {
+    const uint8_t* const iend = ip + inlen;
+    out.clear();
+    for (;;) {
+        if (ip >= iend) return false;
+        const unsigned token = *ip++;
+        size_t lit = token >> 4;
+        if (lit == 15) { unsigned s; do { if (ip >= iend) return false; s = *ip++; lit += s; if (lit > outlen) return false; } while (s == 255); }
+        if (lit > size_t(iend - ip) || out.size() + lit > outlen) return false;
+        out.insert(out.end(), ip, ip + lit);
+        ip += lit;
+        if (ip == iend) return out.size() == outlen;
+        if (iend - ip < 2) return false;
+        const size_t offset = size_t(ip[0]) | (size_t(ip[1]) << 8);
+        ip += 2;
+        if (offset == 0 || offset > out.size()) return false;
+        size_t mlen = token & 15;
+        if (mlen == 15) { unsigned s; do { if (ip >= iend) return false; s = *ip++; mlen += s; if (mlen > outlen) return false; } while (s == 255); }
+        mlen += 4;
+        if (out.size() + mlen > outlen) return false;
+        for (size_t i = 0; i < mlen; ++i) out.push_back(out[out.size() - offset]);
+    }
+}
+
+// Exact-size heap buffer so ASan flags any write past the end.
+static bool decode_exact(const Bytes& enc, size_t outlen, Bytes& got) {
+    std::unique_ptr<uint8_t[]> buf(new uint8_t[outlen ? outlen : 1]);
+    const bool ok = block_decompress(enc.data(), enc.size(), buf.get(), outlen);
+    if (ok) got.assign(buf.get(), buf.get() + outlen);
+    return ok;
+}
+
+static void put_len(Bytes& b, size_t n) { while (n >= 255) { b.push_back(255); n -= 255; } b.push_back(uint8_t(n)); }
+
+// Random but valid sequences: literal runs, matches of every offset class, ending in a literal-only token.
+static void test_differential() {
+    for (int iter = 0; iter < 3000; ++iter) {
+        Bytes enc; size_t produced = 0;
+        const int seqs = 1 + int(rng() % 6);
+        for (int s = 0; s < seqs; ++s) {
+            size_t lit = (produced == 0) ? 1 + rng() % 40 : rng() % 40;
+            size_t offset = 1 + rng() % std::min<size_t>(produced + lit, (rng() % 4 == 0) ? 70000 : 48);
+            offset = std::min<size_t>(offset, std::min<size_t>(produced + lit, 65535));
+            const size_t mlen = 4 + ((rng() % 3 == 0) ? rng() % 6000 : rng() % 40);
+            const size_t lc = std::min<size_t>(15, lit), mc = std::min<size_t>(15, mlen - 4);
+            enc.push_back(uint8_t((lc << 4) | mc));
+            if (lit >= 15) put_len(enc, lit - 15);
+            for (size_t i = 0; i < lit; ++i) enc.push_back(uint8_t(rng()));
+            enc.push_back(uint8_t(offset)); enc.push_back(uint8_t(offset >> 8));
+            if (mlen - 4 >= 15) put_len(enc, mlen - 4 - 15);
+            produced += lit + mlen;
+        }
+        const size_t tail = (rng() % 3 == 0) ? 5 + rng() % 8 : 5 + rng() % 200;
+        enc.push_back(tail < 15 ? uint8_t(tail << 4) : uint8_t(0xF0));
+        if (tail >= 15) put_len(enc, tail - 15);
+        for (size_t i = 0; i < tail; ++i) enc.push_back(uint8_t(rng()));
+        const size_t total = produced + tail;
+        Bytes ref, got;
+        const bool rok = ref_decompress(enc.data(), enc.size(), ref, total);
+        const bool dok = decode_exact(enc, total, got);
+        CHECK(rok && dok && ref == got);
+    }
+}
+
+// Mutated blocks: the fast decoder must agree with the reference on accept/reject and on the bytes produced.
+static void test_differential_mutation() {
+    for (int base = 0; base < 6; ++base) {
+        Bytes d = (base % 2) ? periodic(30000, 1 + base * 7) : texty(30000);
+        Bytes c(block_bound(d.size()));
+        c.resize(block_compress(d.data(), d.size(), c.data(), 1 + base % 2));
+        for (int it = 0; it < 20000; ++it) {
+            Bytes m = c;
+            int k = 1 + int(rng() % 3);
+            while (k--) m[rng() % m.size()] = uint8_t(rng());
+            const size_t outlen = (rng() % 5 == 0) ? d.size() + rng() % 5 - 2 : d.size();
+            Bytes ref, got;
+            const bool rok = ref_decompress(m.data(), m.size(), ref, outlen);
+            const bool dok = decode_exact(m, outlen, got);
+            CHECK(rok == dok);
+            if (rok && dok) CHECK(ref == got);
+        }
+    }
+}
+
+// Concurrent put/get/erase on a shared cache: every successful get must return a complete, valid version.
+static void test_cache_concurrency() {
+    const size_t P = 4096;
+    CompressedPageCache cache(P);
+    std::vector<Bytes> versions;
+    for (int v = 0; v < 4; ++v) versions.push_back(v == 3 ? rnd(P) : (v == 2 ? Bytes(P, 0) : texty(P)));
+    std::atomic<int> bad{0};
+    auto worker = [&](unsigned seed) {
+        std::mt19937 r(seed); Bytes got(P);
+        for (int i = 0; i < 20000; ++i) {
+            const uint64_t id = r() % 32;
+            switch (r() % 4) {
+                case 0: case 1: cache.put(id, versions[r() % versions.size()].data()); break;
+                case 2: cache.erase(id); break;
+                default:
+                    if (cache.get(id, got.data())) {
+                        bool match = false;
+                        for (const Bytes& v : versions) match = match || (got == v);
+                        if (!match) ++bad;
+                    }
+            }
+        }
+    };
+    std::vector<std::thread> th;
+    for (unsigned i = 0; i < 6; ++i) th.emplace_back(worker, 100 + i);
+    for (auto& t : th) t.join();
+    CHECK(bad == 0);
+    for (uint64_t id = 0; id < 32; ++id) cache.erase(id);
+    CHECK(cache.compressed_bytes() == 0);                                   // accounting survives the races
 }
 
 static void test_container() {
@@ -160,9 +321,13 @@ static void test_pages() {
 
 int main() {
     test_blocks();
+    test_tight_match_copy();
     test_block_malformed();
+    test_differential();
+    test_differential_mutation();
     test_container();
     test_pages();
+    test_cache_concurrency();
     std::printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

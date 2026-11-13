@@ -70,6 +70,20 @@ CLI: `amdcf compress|decompress|bench|ramsim ...` (see `amdcf` with no arguments
 `make windows` (MinGW-w64 cross-build) or CMake (`cmake -B build && cmake --build build --config Release`, works with MSVC).
 Little-endian targets only, which covers every Windows target (x64 and ARM64).
 
+## Verification
+
+* `make test` runs `test_fast` (141k checks: round trips, a differential test of the decoder against a deliberately naive reference
+  decoder on random valid streams and on mutated blocks, and a multi-threaded page-cache stress test) plus the Python cross-check.
+* `make sanitize` (ASan + UBSan) and `make tsan` (ThreadSanitizer) run the same suite.
+* `make crosscheck-fast` checks the C++ codec against `reference/amdcf/`, an independent pure-Python implementation: archives from either
+  side must decode identically in the other, and mutated archives must be accepted or rejected identically by both.
+
+## Decoder microbenchmark (synthetic)
+
+`make bench-fast` decodes one block with a long short-period match (offsets 2 to 64) over and over from cache. It shows 40-80 GB/s
+because `memcpy`-based expansion of a long repeat is the decoder's best case. **This is not real-data throughput**; for that, use the
+table above (about 2-4 GB/s per core on typical data). Quote the two separately.
+
 ## What this does NOT do: "optimizing Windows by compressing its RAM"
 
 Be clear about the limits before relying on this for that goal:

@@ -11,8 +11,11 @@ models with check bytes + 2 match models, mixed by a two-layer logistic mixer ne
 
 ```
 make                      # builds amdc1, amdcf and both test programs
-make test                 # unit checks, C++/Python byte-identity cross-check
-make sanitize             # fast codec under ASan/UBSan, incl. 200k-mutation decoder fuzz
+make test                 # unit checks, C++/Python cross-checks (amdc1 byte-identity, amdcf interoperability)
+make sanitize             # fast codec under ASan/UBSan, incl. decoder fuzz and differential tests
+make tsan                 # page cache under ThreadSanitizer (concurrent put/get/erase)
+make crosscheck-fast      # amdcf C++ vs the pure-Python reference in reference/amdcf/
+make bench-fast           # synthetic match-copy decoder microbenchmark (best case, not real-data speed)
 make windows              # amdcf.exe / amdc1.exe / test_fast.exe via MinGW-w64
 build/amdc1 compress   [-b BYTES] [-l 0|1|2] [-m BITS] [-j N] [--verify] IN OUT
 build/amdc1 decompress [--max-output BYTES] [-j N] IN OUT
@@ -24,7 +27,8 @@ tools/ablate.sh DIR                       # size impact of removing each model i
 * `-m BITS` bounds memory (16..24, default 22). `-l 0 -m 20` runs in about 63 MB, `-l 1 -m 20` in about 99 MB; the default needs about 120 MB (lite) / 220 MB (full).
 * Blocks default to 16 MiB (larger blocks share more context; independent 1 MiB blocks cost about 4.6% on text). Blocks are independent and processed in parallel with `-j`; output is identical for any `-j`.
 * 8-bit PGM/PPM files get a dedicated lossless image path and are reproduced byte-for-byte.
-* `reference/amdc1/` is an independent pure-Python implementation of the same format (`PYTHONPATH=reference python3 -m amdc1 ...`); `make test` checks that both produce byte-identical archives.
+* `reference/amdcf/` is an independent pure-Python AMDC-F (blocks, pages, container); `make crosscheck-fast` checks it against the C++ codec in both directions.
+- `reference/amdc1/` is an independent pure-Python implementation of the same format (`PYTHONPATH=reference python3 -m amdc1 ...`); `make test` checks that both produce byte-identical archives.
 
 ## Results (complete Silesia corpus, 211.9 MB, one core, every round trip verified)
 

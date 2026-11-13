@@ -20,15 +20,32 @@ build/test_amdc1: $(CM_SRC) tests/test_amdc1.cpp src/amdc1.hpp src/transforms.hp
 build/test_fast: $(FAST_SRC) tests/test_fast.cpp src/fast.hpp src/pagecache.hpp | build
 	$(CXX) $(CXXFLAGS) $(FAST_SRC) tests/test_fast.cpp -o $@
 
+build/bench_matchcopy: $(FAST_SRC) bench/matchcopy_bench.cpp src/fast.hpp | build
+	$(CXX) $(CXXFLAGS) $(FAST_SRC) bench/matchcopy_bench.cpp -o $@
+
+# Synthetic decoder microbenchmark (hot-cache best case, not real-data throughput)
+bench-fast: build/bench_matchcopy
+	./build/bench_matchcopy 4096
+
+# AMDC-F C++ <-> pure-Python reference interoperability
+crosscheck-fast: build/amdcf
+	python3 tests/crosscheck_fast.py
+
 test: all
 	./build/test_amdc1
 	./build/test_fast
 	sh tests/crosscheck.sh
+	python3 tests/crosscheck_fast.py
 
 # Memory-safety run of the fast codec (decoder fuzz included)
 sanitize: | build
 	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -pthread $(FAST_SRC) tests/test_fast.cpp -o build/test_fast_san
 	./build/test_fast_san
+
+# Data-race check of the page cache (concurrent put/get/erase test)
+tsan: | build
+	$(CXX) -std=c++17 -O1 -g -fsanitize=thread -pthread $(FAST_SRC) tests/test_fast.cpp -o build/test_fast_tsan
+	./build/test_fast_tsan
 
 # Windows x64 executables via MinGW-w64 (apt install g++-mingw-w64-x86-64-posix); static, no DLLs needed
 windows: | build
@@ -39,4 +56,4 @@ windows: | build
 clean:
 	rm -rf build
 
-.PHONY: all test sanitize windows clean
+.PHONY: all test crosscheck-fast sanitize tsan bench-fast windows clean

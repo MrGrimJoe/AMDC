@@ -175,6 +175,21 @@ size_t block_compress(const uint8_t* src, size_t n, uint8_t* dst, int level) {
     return level >= 2 ? compress_level2(src, n, dst) : compress_level1(src, n, dst);
 }
 
+namespace {
+// Writes mlen bytes at op that repeat the `offset`-byte period ending at op (m == op - offset, offset < mlen).
+// Copies one period, then doubles the produced prefix. Every memcpy has disjoint ranges, the produced prefix
+// is always a whole number of periods until the final partial chunk, and no slack beyond op + mlen is touched.
+inline void expand_period(uint8_t* op, const uint8_t* m, size_t offset, size_t mlen) {
+    std::memcpy(op, m, offset);
+    size_t made = offset;
+    while (made < mlen) {
+        const size_t chunk = std::min(made, mlen - made);
+        std::memcpy(op + made, op, chunk);
+        made += chunk;
+    }
+}
+}  // namespace
+
 bool block_decompress(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen) {
     const uint8_t* const iend = ip + inlen;
     uint8_t* op = dst;
@@ -223,15 +238,27 @@ bool block_decompress(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outl
         const uint8_t* m = op - offset;
         const size_t room = size_t(oend - op);
         if (offset >= 16) {
-            if (room >= mlen + 16) {
+            if (offset < mlen && mlen >= 256) {
+                // Long overlapping match: expand by doubling (wide memcpy, disjoint ranges, no slack needed).
+                expand_period(op, m, offset, mlen);
+            } else if (room >= mlen + 16) {
                 uint8_t* d = op;
                 uint8_t* const e = op + mlen;
                 do { copy16(d, m); d += 16; m += 16; } while (d < e);
             } else {
-                for (size_t i = 0; i < mlen; ++i) op[i] = m[i];
+                // Tight output: exact 16-byte chunks are safe for ANY offset >= 16 (each chunk's source lies
+                // entirely below its destination), so no output slack is needed. The < 16 byte remainder is
+                // disjoint too, because the remainder is shorter than the offset.
+                size_t i = 0;
+                for (; i + 16 <= mlen; i += 16) copy16(op + i, m + i);
+                if (i < mlen) std::memcpy(op + i, m + i, mlen - i);
             }
         } else if (offset == 1) {
             std::memset(op, m[0], mlen);
+        } else if (mlen >= 1024 || (room < mlen + 16 && mlen >= 128)) {
+            // Long short-period matches benefit from logarithmic expansion even with slack available;
+            // medium matches use it when the output is tight.
+            expand_period(op, m, offset, mlen);
         } else if (room >= mlen + 16) {
             // short period: write 16 bytes by hand, then continue from a multiple of the period >= 16
             size_t pre = mlen < 16 ? mlen : 16;
