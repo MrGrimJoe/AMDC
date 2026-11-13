@@ -1,0 +1,570 @@
+{
+ "binaries": {
+  "raw": 50331625,
+  "rows": [
+   {
+    "config": "AMDC-F independent files L1",
+    "bytes": 28141546,
+    "comp_mbs": 353.0,
+    "dec_mbs": 1295.0
+   },
+   {
+    "config": "AMDC-F independent files L2",
+    "bytes": 24778750,
+    "comp_mbs": 74.0,
+    "dec_mbs": 1378.0
+   },
+   {
+    "config": "AMDC-S concat (g=1024,u=0,ext order) L1",
+    "bytes": 27948932,
+    "comp_mbs": 341.0,
+    "dec_mbs": 1343.0
+   },
+   {
+    "config": "AMDC-S concat (g=1024,u=0,ext order) L2",
+    "bytes": 24534759,
+    "comp_mbs": 82.0,
+    "dec_mbs": 1731.0
+   },
+   {
+    "config": "AMDC-S interleave (g=32,u=1,extsize order) L1",
+    "bytes": 28737868,
+    "comp_mbs": 340.0,
+    "dec_mbs": 1518.0
+   },
+   {
+    "config": "AMDC-S interleave (g=32,u=1,extsize order) L2",
+    "bytes": 25581685,
+    "comp_mbs": 86.0,
+    "dec_mbs": 1582.0
+   },
+   {
+    "config": "tar+lz4 level 0",
+    "bytes": 29177400,
+    "comp_mbs": 432.56060347509646,
+    "dec_mbs": 1643.9627702266218
+   },
+   {
+    "config": "tar+lz4 level 9",
+    "bytes": 23614678,
+    "comp_mbs": 28.66431585518972,
+    "dec_mbs": 1869.261991059049
+   },
+   {
+    "config": "tar+zstd level 1",
+    "bytes": 22526795,
+    "comp_mbs": 440.4005522388817,
+    "dec_mbs": 1052.565313513501
+   },
+   {
+    "config": "tar+zstd level 3",
+    "bytes": 19881421,
+    "comp_mbs": 184.36397182912268,
+    "dec_mbs": 865.8938089938974
+   },
+   {
+    "config": "tar+zstd level 19",
+    "bytes": 15703233,
+    "comp_mbs": 1.9997921118524526,
+    "dec_mbs": 579.0818614679613
+   }
+  ]
+ },
+ "headers": {
+  "raw": 42914412,
+  "rows": [
+   {
+    "config": "AMDC-F independent files L1",
+    "bytes": 15938578,
+    "comp_mbs": 381.0,
+    "dec_mbs": 1053.0
+   },
+   {
+    "config": "AMDC-F independent files L2",
+    "bytes": 13454354,
+    "comp_mbs": 86.0,
+    "dec_mbs": 1036.0
+   },
+   {
+    "config": "AMDC-S concat (g=1024,u=0,ext order) L1",
+    "bytes": 13017606,
+    "comp_mbs": 553.0,
+    "dec_mbs": 1509.0
+   },
+   {
+    "config": "AMDC-S concat (g=1024,u=0,ext order) L2",
+    "bytes": 9984268,
+    "comp_mbs": 118.0,
+    "dec_mbs": 1644.0
+   },
+   {
+    "config": "AMDC-S interleave (g=32,u=1,extsize order) L1",
+    "bytes": 14969632,
+    "comp_mbs": 463.0,
+    "dec_mbs": 1335.0
+   },
+   {
+    "config": "AMDC-S interleave (g=32,u=1,extsize order) L2",
+    "bytes": 12233265,
+    "comp_mbs": 114.0,
+    "dec_mbs": 1373.0
+   },
+   {
+    "config": "tar+lz4 level 0",
+    "bytes": 12865988,
+    "comp_mbs": 518.7639108818145,
+    "dec_mbs": 1700.0883432073254
+   },
+   {
+    "config": "tar+lz4 level 9",
+    "bytes": 9465997,
+    "comp_mbs": 37.3724482158112,
+    "dec_mbs": 1860.5976001376457
+   },
+   {
+    "config": "tar+zstd level 1",
+    "bytes": 8680350,
+    "comp_mbs": 439.1905017121708,
+    "dec_mbs": 958.3190592127
+   },
+   {
+    "config": "tar+zstd level 3",
+    "bytes": 7595102,
+    "comp_mbs": 290.95925839263157,
+    "dec_mbs": 1294.3629487541207
+   },
+   {
+    "config": "tar+zstd level 19",
+    "bytes": 5528301,
+    "comp_mbs": 2.1351539894800373,
+    "dec_mbs": 1054.9983860742238
+   }
+  ]
+ },
+ "libraries": {
+  "raw": 50322678,
+  "rows": [
+   {
+    "config": "AMDC-F independent files L1",
+    "bytes": 26265336,
+    "comp_mbs": 395.0,
+    "dec_mbs": 1426.0
+   },
+   {
+    "config": "AMDC-F independent files L2",
+    "bytes": 23099434,
+    "comp_mbs": 82.0,
+    "dec_mbs": 1378.0
+   },
+   {
+    "config": "AMDC-S concat (g=1024,u=0,ext order) L1",
+    "bytes": 26266656,
+    "comp_mbs": 372.0,
+    "dec_mbs": 1502.0
+   },
+   {
+    "config": "AMDC-S concat (g=1024,u=0,ext order) L2",
+    "bytes": 23090240,
+    "comp_mbs": 89.0,
+    "dec_mbs": 1650.0
+   },
+   {
+    "config": "AMDC-S interleave (g=32,u=1,extsize order) L1",
+    "bytes": 27347884,
+    "comp_mbs": 370.0,
+    "dec_mbs": 1530.0
+   },
+   {
+    "config": "AMDC-S interleave (g=32,u=1,extsize order) L2",
+    "bytes": 24302399,
+    "comp_mbs": 82.0,
+    "dec_mbs": 1508.0
+   },
+   {
+    "config": "tar+lz4 level 0",
+    "bytes": 27262949,
+    "comp_mbs": 458.2031851804407,
+    "dec_mbs": 1578.177438795109
+   },
+   {
+    "config": "tar+lz4 level 9",
+    "bytes": 22318929,
+    "comp_mbs": 29.22545819116032,
+    "dec_mbs": 1681.5213643757284
+   },
+   {
+    "config": "tar+zstd level 1",
+    "bytes": 21010901,
+    "comp_mbs": 414.9497549968204,
+    "dec_mbs": 870.8962733107818
+   },
+   {
+    "config": "tar+zstd level 3",
+    "bytes": 18876100,
+    "comp_mbs": 193.66617910828955,
+    "dec_mbs": 858.4716724983432
+   },
+   {
+    "config": "tar+zstd level 19",
+    "bytes": 15072170,
+    "comp_mbs": 1.9884045012736713,
+    "dec_mbs": 512.483967524073
+   }
+  ]
+ },
+ "mixed": {
+  "raw": 50331564,
+  "rows": [
+   {
+    "config": "AMDC-F independent files L1",
+    "bytes": 27441114,
+    "comp_mbs": 393.0,
+    "dec_mbs": 1021.0
+   },
+   {
+    "config": "AMDC-F independent files L2",
+    "bytes": 25176818,
+    "comp_mbs": 84.0,
+    "dec_mbs": 1298.0
+   },
+   {
+    "config": "AMDC-S concat (g=1024,u=0,ext order) L1",
+    "bytes": 26707300,
+    "comp_mbs": 534.0,
+    "dec_mbs": 1673.0
+   },
+   {
+    "config": "AMDC-S concat (g=1024,u=0,ext order) L2",
+    "bytes": 24305919,
+    "comp_mbs": 96.0,
+    "dec_mbs": 1662.0
+   },
+   {
+    "config": "AMDC-S interleave (g=32,u=1,extsize order) L1",
+    "bytes": 27125174,
+    "comp_mbs": 435.0,
+    "dec_mbs": 1451.0
+   },
+   {
+    "config": "AMDC-S interleave (g=32,u=1,extsize order) L2",
+    "bytes": 24792742,
+    "comp_mbs": 100.0,
+    "dec_mbs": 1415.0
+   },
+   {
+    "config": "tar+lz4 level 0",
+    "bytes": 27082200,
+    "comp_mbs": 614.4228704996218,
+    "dec_mbs": 1831.7569843191998
+   },
+   {
+    "config": "tar+lz4 level 9",
+    "bytes": 23839705,
+    "comp_mbs": 32.937038492844536,
+    "dec_mbs": 2004.604991785489
+   },
+   {
+    "config": "tar+zstd level 1",
+    "bytes": 22453685,
+    "comp_mbs": 469.09163381665746,
+    "dec_mbs": 1081.784400043148
+   },
+   {
+    "config": "tar+zstd level 3",
+    "bytes": 21265989,
+    "comp_mbs": 217.90564443666796,
+    "dec_mbs": 821.2355348633815
+   },
+   {
+    "config": "tar+zstd level 19",
+    "bytes": 19127357,
+    "comp_mbs": 2.5576025922652086,
+    "dec_mbs": 827.8232604069976
+   }
+  ]
+ },
+ "random_control": {
+  "raw": 30720000,
+  "rows": [
+   {
+    "config": "AMDC-F independent files L1",
+    "bytes": 30726300,
+    "comp_mbs": 1877.0,
+    "dec_mbs": 3162.0
+   },
+   {
+    "config": "AMDC-F independent files L2",
+    "bytes": 30726300,
+    "comp_mbs": 75.0,
+    "dec_mbs": 3230.0
+   },
+   {
+    "config": "AMDC-S concat (g=1024,u=0,ext order) L1",
+    "bytes": 30724680,
+    "comp_mbs": 993.0,
+    "dec_mbs": 1566.0
+   },
+   {
+    "config": "AMDC-S concat (g=1024,u=0,ext order) L2",
+    "bytes": 30724680,
+    "comp_mbs": 102.0,
+    "dec_mbs": 1981.0
+   },
+   {
+    "config": "AMDC-S interleave (g=32,u=1,extsize order) L1",
+    "bytes": 30724695,
+    "comp_mbs": 894.0,
+    "dec_mbs": 1905.0
+   },
+   {
+    "config": "AMDC-S interleave (g=32,u=1,extsize order) L2",
+    "bytes": 30724695,
+    "comp_mbs": 113.0,
+    "dec_mbs": 1715.0
+   },
+   {
+    "config": "tar+lz4 level 0",
+    "bytes": 30828474,
+    "comp_mbs": 1493.5357904096895,
+    "dec_mbs": 3219.8513900802714
+   },
+   {
+    "config": "tar+lz4 level 9",
+    "bytes": 30817547,
+    "comp_mbs": 38.100764501514256,
+    "dec_mbs": 3112.734804038843
+   },
+   {
+    "config": "tar+zstd level 1",
+    "bytes": 30875015,
+    "comp_mbs": 2040.528672285375,
+    "dec_mbs": 6451.118393429133
+   },
+   {
+    "config": "tar+zstd level 3",
+    "bytes": 30874929,
+    "comp_mbs": 1603.3738493189273,
+    "dec_mbs": 7032.91389970254
+   },
+   {
+    "config": "tar+zstd level 19",
+    "bytes": 30812860,
+    "comp_mbs": 3.5935772352029365,
+    "dec_mbs": 5794.630158424355
+   }
+  ]
+ },
+ "source_py": {
+  "raw": 10620599,
+  "rows": [
+   {
+    "config": "AMDC-F independent files L1",
+    "bytes": 4380820,
+    "comp_mbs": 340.0,
+    "dec_mbs": 1095.0
+   },
+   {
+    "config": "AMDC-F independent files L2",
+    "bytes": 3585341,
+    "comp_mbs": 62.0,
+    "dec_mbs": 1184.0
+   },
+   {
+    "config": "AMDC-S concat (g=1024,u=0,ext order) L1",
+    "bytes": 3945622,
+    "comp_mbs": 496.0,
+    "dec_mbs": 1432.0
+   },
+   {
+    "config": "AMDC-S concat (g=1024,u=0,ext order) L2",
+    "bytes": 3013480,
+    "comp_mbs": 94.0,
+    "dec_mbs": 1513.0
+   },
+   {
+    "config": "AMDC-S interleave (g=32,u=1,extsize order) L1",
+    "bytes": 4222228,
+    "comp_mbs": 482.0,
+    "dec_mbs": 1401.0
+   },
+   {
+    "config": "AMDC-S interleave (g=32,u=1,extsize order) L2",
+    "bytes": 3388867,
+    "comp_mbs": 96.0,
+    "dec_mbs": 1452.0
+   },
+   {
+    "config": "tar+lz4 level 0",
+    "bytes": 3912386,
+    "comp_mbs": 421.0385706294579,
+    "dec_mbs": 1662.1818459072206
+   },
+   {
+    "config": "tar+lz4 level 9",
+    "bytes": 2815389,
+    "comp_mbs": 23.75599260045372,
+    "dec_mbs": 1844.4982865818447
+   },
+   {
+    "config": "tar+zstd level 1",
+    "bytes": 2649734,
+    "comp_mbs": 371.3471224264019,
+    "dec_mbs": 1234.3867024805063
+   },
+   {
+    "config": "tar+zstd level 3",
+    "bytes": 2406754,
+    "comp_mbs": 214.0351023561167,
+    "dec_mbs": 1022.906220875312
+   },
+   {
+    "config": "tar+zstd level 19",
+    "bytes": 1795352,
+    "comp_mbs": 1.7419258654503817,
+    "dec_mbs": 834.6259220335033
+   }
+  ]
+ },
+ "source_versions": {
+  "raw": 32841163,
+  "rows": [
+   {
+    "config": "AMDC-F independent files L1",
+    "bytes": 13691665,
+    "comp_mbs": 351.0,
+    "dec_mbs": 1168.0
+   },
+   {
+    "config": "AMDC-F independent files L2",
+    "bytes": 11224612,
+    "comp_mbs": 61.0,
+    "dec_mbs": 1167.0
+   },
+   {
+    "config": "AMDC-S concat (g=1024,u=0,ext order) L1",
+    "bytes": 12305621,
+    "comp_mbs": 462.0,
+    "dec_mbs": 1220.0
+   },
+   {
+    "config": "AMDC-S concat (g=1024,u=0,ext order) L2",
+    "bytes": 9383521,
+    "comp_mbs": 93.0,
+    "dec_mbs": 1719.0
+   },
+   {
+    "config": "AMDC-S interleave (g=32,u=1,extsize order) L1",
+    "bytes": 8273845,
+    "comp_mbs": 673.0,
+    "dec_mbs": 1677.0
+   },
+   {
+    "config": "AMDC-S interleave (g=32,u=1,extsize order) L2",
+    "bytes": 6714492,
+    "comp_mbs": 136.0,
+    "dec_mbs": 1809.0
+   },
+   {
+    "config": "tar+lz4 level 0",
+    "bytes": 12206188,
+    "comp_mbs": 359.7183890314928,
+    "dec_mbs": 1613.6686356539562
+   },
+   {
+    "config": "tar+lz4 level 9",
+    "bytes": 8775232,
+    "comp_mbs": 23.74769633177306,
+    "dec_mbs": 1711.4268140488946
+   },
+   {
+    "config": "tar+zstd level 1",
+    "bytes": 8246722,
+    "comp_mbs": 366.6899338299208,
+    "dec_mbs": 934.9629068591174
+   },
+   {
+    "config": "tar+zstd level 3",
+    "bytes": 7488925,
+    "comp_mbs": 163.70394780713664,
+    "dec_mbs": 730.9483197773991
+   },
+   {
+    "config": "tar+zstd level 19",
+    "bytes": 5484634,
+    "comp_mbs": 1.516582085161765,
+    "dec_mbs": 772.8817494678951
+   }
+  ]
+ },
+ "text_docs": {
+  "raw": 18982366,
+  "rows": [
+   {
+    "config": "AMDC-F independent files L1",
+    "bytes": 6865232,
+    "comp_mbs": 361.0,
+    "dec_mbs": 1033.0
+   },
+   {
+    "config": "AMDC-F independent files L2",
+    "bytes": 5859148,
+    "comp_mbs": 83.0,
+    "dec_mbs": 967.0
+   },
+   {
+    "config": "AMDC-S concat (g=1024,u=0,ext order) L1",
+    "bytes": 4634649,
+    "comp_mbs": 701.0,
+    "dec_mbs": 1591.0
+   },
+   {
+    "config": "AMDC-S concat (g=1024,u=0,ext order) L2",
+    "bytes": 3573193,
+    "comp_mbs": 147.0,
+    "dec_mbs": 1772.0
+   },
+   {
+    "config": "AMDC-S interleave (g=32,u=1,extsize order) L1",
+    "bytes": 2855477,
+    "comp_mbs": 872.0,
+    "dec_mbs": 1915.0
+   },
+   {
+    "config": "AMDC-S interleave (g=32,u=1,extsize order) L2",
+    "bytes": 2330369,
+    "comp_mbs": 240.0,
+    "dec_mbs": 2003.0
+   },
+   {
+    "config": "tar+lz4 level 0",
+    "bytes": 4671711,
+    "comp_mbs": 625.1624174052619,
+    "dec_mbs": 2014.2210901750266
+   },
+   {
+    "config": "tar+lz4 level 9",
+    "bytes": 3269408,
+    "comp_mbs": 56.33988664607681,
+    "dec_mbs": 1778.3520216473569
+   },
+   {
+    "config": "tar+zstd level 1",
+    "bytes": 2614182,
+    "comp_mbs": 438.55166795611916,
+    "dec_mbs": 1420.563468346374
+   },
+   {
+    "config": "tar+zstd level 3",
+    "bytes": 2171094,
+    "comp_mbs": 408.43174314457224,
+    "dec_mbs": 1502.3758798859124
+   },
+   {
+    "config": "tar+zstd level 19",
+    "bytes": 942968,
+    "comp_mbs": 4.9189812836817275,
+    "dec_mbs": 2490.7469393955475
+   }
+  ]
+ }
+}

@@ -217,6 +217,63 @@ static void test_differential_mutation() {
     }
 }
 
+// Tight-output short-period matches (offset 2..15): the final-match fallback. Every offset x every match length
+// 4..300 (shorter and longer than one period) x several literal tails, decoded into an exact-size heap buffer.
+static void test_short_period_tight() {
+    for (size_t offset = 2; offset <= 15; ++offset) {
+        for (size_t mlen = 4; mlen <= 300; ++mlen) {
+            for (size_t tail : {size_t(5), size_t(6), size_t(11), size_t(15), size_t(16)}) {
+                Bytes enc, expected;
+                const size_t mc = mlen - 4;
+                enc.push_back(uint8_t((std::min<size_t>(15, offset) << 4) | std::min<size_t>(15, mc)));
+                if (offset >= 15) put_len(enc, offset - 15);
+                for (size_t i = 0; i < offset; ++i) { enc.push_back(uint8_t(rng())); expected.push_back(enc.back()); }
+                enc.push_back(uint8_t(offset)); enc.push_back(uint8_t(offset >> 8));
+                if (mc >= 15) put_len(enc, mc - 15);
+                for (size_t i = 0; i < mlen; ++i) expected.push_back(expected[expected.size() - offset]);
+                enc.push_back(tail < 15 ? uint8_t(tail << 4) : uint8_t(0xF0));
+                if (tail >= 15) put_len(enc, tail - 15);
+                for (size_t i = 0; i < tail; ++i) { enc.push_back(uint8_t(rng())); expected.push_back(enc.back()); }
+                Bytes got;
+                CHECK(decode_exact(enc, expected.size(), got));
+                CHECK(got == expected);
+                // too-small and too-large declared sizes must be rejected, never over-written
+                Bytes sink;
+                CHECK(!decode_exact(enc, expected.size() - 1, sink));
+                CHECK(!decode_exact(enc, expected.size() + 1, sink));
+                // truncated stream is rejected
+                Bytes cut(enc.begin(), enc.end() - 1);
+                CHECK(!decode_exact(cut, expected.size(), sink));
+            }
+        }
+    }
+}
+
+// Mutations of blocks whose LAST match is a short-offset tight match: must agree with the naive reference.
+static void test_short_period_mutation() {
+    for (int it = 0; it < 30000; ++it) {
+        const size_t offset = 2 + rng() % 14, mlen = 4 + rng() % 140, tail = 5 + rng() % 4;
+        Bytes enc;
+        const size_t mc = mlen - 4;
+        enc.push_back(uint8_t((std::min<size_t>(15, offset) << 4) | std::min<size_t>(15, mc)));
+        if (offset >= 15) put_len(enc, offset - 15);
+        for (size_t i = 0; i < offset; ++i) enc.push_back(uint8_t(rng()));
+        enc.push_back(uint8_t(offset)); enc.push_back(0);
+        if (mc >= 15) put_len(enc, mc - 15);
+        enc.push_back(uint8_t(tail << 4));
+        for (size_t i = 0; i < tail; ++i) enc.push_back(uint8_t(rng()));
+        const size_t total = offset + mlen + tail;
+        Bytes m = enc;
+        for (int k = 1 + int(rng() % 2); k--;) m[rng() % m.size()] = uint8_t(rng());
+        const size_t outlen = (rng() % 4 == 0) ? total + rng() % 5 - 2 : total;
+        Bytes ref, got;
+        const bool rok = ref_decompress(m.data(), m.size(), ref, outlen);
+        const bool dok = decode_exact(m, outlen, got);
+        CHECK(rok == dok);
+        if (rok && dok) CHECK(ref == got);
+    }
+}
+
 // Concurrent put/get/erase on a shared cache: every successful get must return a complete, valid version.
 static void test_cache_concurrency() {
     const size_t P = 4096;
@@ -325,6 +382,8 @@ int main() {
     test_block_malformed();
     test_differential();
     test_differential_mutation();
+    test_short_period_tight();
+    test_short_period_mutation();
     test_container();
     test_pages();
     test_cache_concurrency();

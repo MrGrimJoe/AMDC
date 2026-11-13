@@ -3,7 +3,7 @@ CXXFLAGS ?= -std=c++17 -O3 -Wall -Wextra -pthread
 CM_SRC   := src/cm.cpp src/transforms.cpp src/container.cpp
 FAST_SRC := src/fast.cpp
 
-all: build/amdc1 build/amdcf build/test_amdc1 build/test_fast
+all: build/amdc1 build/amdcf build/test_amdc1 build/test_fast build/amdcs build/test_solid
 
 build:
 	mkdir -p build
@@ -13,6 +13,15 @@ build/amdc1: $(CM_SRC) src/main.cpp src/amdc1.hpp src/transforms.hpp | build
 
 build/amdcf: $(FAST_SRC) src/amdcf_main.cpp src/fast.hpp src/pagecache.hpp | build
 	$(CXX) $(CXXFLAGS) $(FAST_SRC) src/amdcf_main.cpp -o $@
+
+build/amdcs: $(FAST_SRC) src/solid.cpp src/solid_main.cpp src/solid.hpp src/fast.hpp | build
+	$(CXX) $(CXXFLAGS) $(FAST_SRC) src/solid.cpp src/solid_main.cpp -o $@
+
+build/test_solid: $(FAST_SRC) src/solid.cpp tests/test_solid.cpp src/solid.hpp src/fast.hpp | build
+	$(CXX) $(CXXFLAGS) $(FAST_SRC) src/solid.cpp tests/test_solid.cpp -o $@
+
+build/decode_bench: $(FAST_SRC) bench/decode_bench.cpp src/fast.hpp | build
+	$(CXX) $(CXXFLAGS) $(FAST_SRC) bench/decode_bench.cpp -o $@
 
 build/test_amdc1: $(CM_SRC) tests/test_amdc1.cpp src/amdc1.hpp src/transforms.hpp | build
 	$(CXX) $(CXXFLAGS) $(CM_SRC) tests/test_amdc1.cpp -o $@
@@ -34,6 +43,7 @@ crosscheck-fast: build/amdcf
 test: all
 	./build/test_amdc1
 	./build/test_fast
+	./build/test_solid
 	sh tests/crosscheck.sh
 	python3 tests/crosscheck_fast.py
 
@@ -41,6 +51,8 @@ test: all
 sanitize: | build
 	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -pthread $(FAST_SRC) tests/test_fast.cpp -o build/test_fast_san
 	./build/test_fast_san
+	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -pthread $(FAST_SRC) src/solid.cpp tests/test_solid.cpp -o build/test_solid_san
+	./build/test_solid_san
 
 # Data-race check of the page cache (concurrent put/get/erase test)
 tsan: | build

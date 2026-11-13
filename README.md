@@ -30,6 +30,9 @@ tools/ablate.sh DIR                       # size impact of removing each model i
 * `reference/amdcf/` is an independent pure-Python AMDC-F (blocks, pages, container); `make crosscheck-fast` checks it against the C++ codec in both directions.
 - `reference/amdc1/` is an independent pure-Python implementation of the same format (`PYTHONPATH=reference python3 -m amdc1 ...`); `make test` checks that both produce byte-identical archives.
 
+* `amdcs` (optional, experimental): a solid multi-file archive mode for AMDC-F that lets the LZ4-format blocks match across files (`build/amdcs pack|unpack|list|bench`).
+  It helps on sets of similar files and does nothing for unrelated or random data, and it does not beat `tar+zstd` on ratio. Details, honest numbers and limitations: `docs/AMDC-S_Solid_Mode.md`.
+
 ## Results (complete Silesia corpus, 211.9 MB, one core, every round trip verified)
 
 | tool | size | compress MB/s | decompress MB/s |
