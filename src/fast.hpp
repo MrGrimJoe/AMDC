@@ -26,11 +26,27 @@ size_t block_compress(const uint8_t* src, size_t n, uint8_t* dst, int level = 1)
 // Memory-safe on arbitrary input. Returns true iff `src` decodes to exactly `out_len` bytes.
 bool block_decompress(const uint8_t* src, size_t n, uint8_t* dst, size_t out_len);
 
+// ---- page format v2: same LZ4-style tokens but 1-byte near/repeat offsets. NOT LZ4 compatible. ---------
+constexpr size_t kPage2Max = 4336;   // largest input it can address (offsets are at most 240 + 4095)
+size_t page2_compress(const uint8_t* src, size_t n, uint8_t* dst, int level = 1);   // dst >= block_bound(n)
+bool page2_decompress(const uint8_t* src, size_t n, uint8_t* dst, size_t out_len);
+
+// Complete page codec on top of page2: zero / fill pages, LZ2, and (level >= 3) LZ2 with Huffman literals when that
+// is smaller. level 1 = fast parse, 2 = chained parse, 3 = fast parse + Huffman literals, 4 = chained + Huffman.
+// Returns the blob size (first byte = kind), or 0 when the page does not shrink. Pages up to kPage2Max bytes only.
+// `out` needs page3_bound(n) bytes.
+inline size_t page3_bound(size_t n) { return block_bound(n) + 16; }
+size_t page3_compress(const uint8_t* page, size_t n, uint8_t* out, int level = 1);
+bool page3_decompress(const uint8_t* enc, size_t len, uint8_t* page, size_t n);
+
 // ---- page codec (RAM compression building block) --------------------------------------------------
-enum PageKind : uint8_t { PAGE_RAW = 0, PAGE_ZERO = 1, PAGE_FILL = 2, PAGE_LZ = 3 };
+enum PageKind : uint8_t { PAGE_RAW = 0, PAGE_ZERO = 1, PAGE_FILL = 2, PAGE_LZ = 3, PAGE_LZ2 = 4, PAGE_HUF = 5 };
 
-inline size_t page_encode_bound(size_t page) { return block_bound(page) + 1; }
+inline size_t page_encode_bound(size_t page) { return block_bound(page) + 17; }
 
+// Levels: 1 and 2 write LZ4-format blobs (kind PAGE_LZ). Levels 3-6 (pages up to kPage2Max bytes; larger pages fall
+// back to levels 1/2) write the page v2/v3 formats: 3 = fast parse, 4 = chained parse, 5 = fast parse + Huffman
+// literals, 6 = chained parse + Huffman literals. Level 5 is the best speed/size balance; level 6 is smallest.
 // Encodes one page into `out` (>= page_encode_bound(page) bytes). Returns the encoded size, or 0 when the
 // page is not worth compressing (encoded size would exceed page * max_pct / 100): keep it uncompressed.
 // All-zero and single-byte-fill pages cost 1 and 2 bytes.

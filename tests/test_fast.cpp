@@ -376,6 +376,125 @@ static void test_pages() {
     CHECK(cache.erase(2) && !cache.get(2, got.data()) && !cache.erase(2));
 }
 
+
+// ---- page formats v2 / v3 ---------------------------------------------------------------------------------------
+// deliberately naive page2 decoder: one byte at a time, every bound checked, written from the format description
+static bool ref_page2(const uint8_t* ip, size_t inlen, Bytes& out, size_t outlen) {
+    out.clear();
+    const uint8_t* e = ip + inlen;
+    size_t last = 0;
+    for (;;) {
+        if (ip >= e) return false;
+        unsigned t = *ip++;
+        size_t lit = t >> 4;
+        if (lit == 15) { unsigned b; do { if (ip >= e) return false; b = *ip++; lit += b; if (lit > outlen) return false; } while (b == 255); }
+        if (lit > size_t(e - ip) || out.size() + lit > outlen) return false;
+        for (size_t i = 0; i < lit; ++i) out.push_back(*ip++);
+        if (ip == e) return out.size() == outlen;
+        size_t off;
+        unsigned o = *ip++;
+        if (o == 0) off = last;
+        else if (o < 0xF0) off = o;
+        else { if (ip >= e) return false; off = ((size_t(o & 15) << 8) | *ip++) + 240; }
+        last = off;
+        if (off == 0 || off > out.size()) return false;
+        size_t ml = t & 15;
+        if (ml == 15) { unsigned b; do { if (ip >= e) return false; b = *ip++; ml += b; if (ml > outlen) return false; } while (b == 255); }
+        ml += 4;
+        if (out.size() + ml > outlen) return false;
+        for (size_t i = 0; i < ml; ++i) out.push_back(out[out.size() - off]);
+    }
+}
+
+static Bytes structured(size_t n, int stride) {      // like an array of small records: counters, pointers, flags
+    Bytes b(n);
+    for (size_t i = 0; i < n; ++i) {
+        size_t rec = i / stride, f = i % stride;
+        b[i] = f == 0 ? uint8_t(rec) : f < 3 ? uint8_t(rec >> 8) : f == 3 ? 0x7f : f < 6 ? 0 : uint8_t(rng() % 5);
+    }
+    return b;
+}
+
+static std::vector<Bytes> page_samples(size_t n) {
+    std::vector<Bytes> v;
+    v.push_back(texty(n)); v.push_back(rnd(n, 3)); v.push_back(rnd(n, 16)); v.push_back(rnd(n, 64)); v.push_back(rnd(n));
+    v.push_back(periodic(n, 7)); v.push_back(periodic(n, 100)); v.push_back(periodic(n, 700));
+    v.push_back(structured(n, 8)); v.push_back(structured(n, 24)); v.push_back(structured(n, 64));
+    Bytes mix = texty(n);
+    for (size_t i = n / 3; i < n / 2; ++i) mix[i] = uint8_t(rng());
+    v.push_back(mix);
+    return v;
+}
+
+static void test_page3() {
+    size_t huf_used = 0, lz2_used = 0;
+    for (size_t n : {size_t(1), size_t(15), size_t(16), size_t(17), size_t(100), size_t(511), size_t(1000), size_t(4095), size_t(4096), size_t(4336)}) {
+        for (const Bytes& pg : page_samples(n)) {
+            Bytes enc(page3_bound(n)), out(n);
+            for (int lvl = 1; lvl <= 4; ++lvl) {
+                size_t c = page3_compress(pg.data(), n, enc.data(), lvl);
+                if (!c) continue;
+                CHECK(c < n);
+                if (enc[0] == PAGE_HUF) ++huf_used;
+                if (enc[0] == PAGE_LZ2) ++lz2_used;
+                std::fill(out.begin(), out.end(), 0x55);
+                CHECK(page3_decompress(enc.data(), c, out.data(), n) && out == pg);
+                Bytes sink(n + 1);
+                CHECK(!page3_decompress(enc.data(), c, sink.data(), n + 1) || enc[0] == PAGE_FILL || enc[0] == PAGE_ZERO);
+                if (n > 1) CHECK(!page3_decompress(enc.data(), c, sink.data(), n - 1) || enc[0] == PAGE_FILL || enc[0] == PAGE_ZERO);
+                CHECK(!page3_decompress(enc.data(), c - 1, out.data(), n) || enc[0] == PAGE_FILL);
+            }
+            // page2 against the naive decoder, on the valid stream
+            if (n >= 16) {
+                Bytes e2(block_bound(n)), ref;
+                for (int lvl = 1; lvl <= 2; ++lvl) {
+                    size_t c2 = page2_compress(pg.data(), n, e2.data(), lvl);
+                    Bytes o2(n);
+                    CHECK(page2_decompress(e2.data(), c2, o2.data(), n) && o2 == pg);
+                    CHECK(ref_page2(e2.data(), c2, ref, n) && ref == pg);
+                }
+            }
+        }
+    }
+    CHECK(huf_used > 20 && lz2_used > 20);   // both kinds are really exercised
+    std::printf("page3 kinds exercised: huf %zu, lz2 %zu\n", huf_used, lz2_used);
+}
+
+static void test_page3_mutation() {
+    // random corruption of valid blobs: never crash / over-read / over-write (ASan build checks);
+    // page2 streams must additionally be accepted or rejected exactly like the naive decoder
+    size_t decoded_ok = 0, total = 0;
+    for (size_t n : {size_t(300), size_t(2048), size_t(4096)}) {
+        for (const Bytes& pg : page_samples(n)) {
+            for (int lvl : {1, 3, 4}) {
+                Bytes enc(page3_bound(n));
+                size_t c = page3_compress(pg.data(), n, enc.data(), lvl);
+                if (c < 4) continue;
+                for (int it = 0; it < 600; ++it) {
+                    Bytes m(enc.begin(), enc.begin() + long(c));
+                    int k = 1 + int(rng() % 3);
+                    for (int j = 0; j < k; ++j) {
+                        size_t pos = rng() % m.size();
+                        switch (rng() % 3) { case 0: m[pos] ^= uint8_t(1u << (rng() % 8)); break; case 1: m[pos] = uint8_t(rng()); break; default: m[pos] = uint8_t(m[pos] + 1); }
+                    }
+                    if (rng() % 8 == 0) m.resize(1 + rng() % m.size());
+                    Bytes out(n + 64, 0xCC);            // guard bytes after the page must stay untouched
+                    const bool ok = page3_decompress(m.data(), m.size(), out.data(), n);
+                    ++total; decoded_ok += ok;
+                    for (size_t i = n; i < out.size(); ++i) if (out[i] != 0xCC) { CHECK(false); break; }
+                    if (m[0] == PAGE_LZ2 && n >= 16) {
+                        Bytes ref;
+                        const bool rok = ref_page2(m.data() + 1, m.size() - 1, ref, n);
+                        CHECK(rok == ok);
+                        if (rok && ok) CHECK(ref == Bytes(out.begin(), out.begin() + long(n)));
+                    }
+                }
+            }
+        }
+    }
+    std::printf("page3 mutation: %zu blobs, %zu still decoded\n", total, decoded_ok);
+}
+
 int main() {
     test_blocks();
     test_tight_match_copy();
@@ -386,6 +505,8 @@ int main() {
     test_short_period_mutation();
     test_container();
     test_pages();
+    test_page3();
+    test_page3_mutation();
     test_cache_concurrency();
     std::printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;

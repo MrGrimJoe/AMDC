@@ -84,6 +84,59 @@ Little-endian targets only, which covers every Windows target (x64 and ARM64).
 because `memcpy`-based expansion of a long repeat is the decoder's best case. **This is not real-data throughput**; for that, use the
 table above (about 2-4 GB/s per core on typical data). Quote the two separately.
 
+## Page levels 3-6: a RAM-page format that is smaller than LZ4 (new)
+
+The LZ4 block format spends two bytes on every offset and cannot entropy-code anything, which caps it near 41% on
+4 KiB memory pages. For pages (up to 4336 bytes) there are four more levels in `page_compress` / `CompressedPageCache`.
+**These blobs are not LZ4-compatible** (the container and levels 1-2 still are):
+
+| level | what it adds | 
+|---|---|
+| 3 | LZ4-style tokens, but offsets cost 1 byte when < 240 or equal to the previous offset (otherwise 2) |
+| 4 | level 3 with a chained, cost-aware parse |
+| 5 | level 3 + Huffman-coded literals (canonical code, max length 10, two interleaved bit streams), only when smaller |
+| 6 | level 4 + Huffman-coded literals |
+
+Per-page results, 4 KiB pages compressed independently, single core, every page decoded and compared. Corpus: 383 MB of
+heap images generated here (Python object graphs, text, numeric arrays, a mixed heap with zero and random pages) plus
+binaries; **not** dumps of a real Windows or Linux machine, so measure your own. LZ4 and zstd were built from current
+upstream sources, zstd with reused contexts (as zswap does). Same-filled pages count as 8 bytes for every codec.
+The shared VM varies by about +-30% between runs, so compare rows within one run.
+
+| codec | size | compress MB/s | decompress MB/s |
+|---|---|---|---|
+| amdcf level 1 (LZ4 format) | 41.5% | 693 | 3164 |
+| amdcf level 2 (LZ4 format) | 37.5% | 131 | 3735 |
+| **amdcf level 3** | 37.2% | 659 | 2425 |
+| **amdcf level 4** | 34.4% | 136 | 2657 |
+| **amdcf level 5** | 33.4% | 250 | 1113 |
+| **amdcf level 6** | 30.9% | 102 | 1210 |
+| lz4 (fast 1) | 41.3% | 899 | 4177 |
+| lz4hc-3 | 37.7% | 204 | 4711 |
+| zstd -3 | 39.1% | 594 | 1842 |
+| zstd 1 | 27.7% | 383 | 925 |
+| zstd 3 | 27.3% | 345 | 956 |
+| zlib 1 (stand-in for Windows' Xpress-Huffman, see below) | 29.0% | 129 | 432 |
+
+Honest reading:
+
+* Against **LZ4-class RAM compressors** (what zram uses by default): levels 3/4 are 4-7 points smaller than LZ4 at similar
+  compress speed, but **LZ4's decoder is still faster** (about 1.3-1.7x). Level 1/2 decode speed is the same class as LZ4's but
+  slightly below it.
+* Against **zstd**: levels 5/6 decode about 1.2-1.3x faster than zstd 1 but are **about 3 points larger**. zstd still wins on size.
+* Against **Windows' compressor (Xpress-Huffman)**: it is not available outside Windows, so it was **not measured**. zlib-1 is
+  the same family (LZ77 + Huffman) and a similar size class, so it is used as a rough proxy only. Level 6 is about 2 points
+  larger than zlib-1 but decodes about 2.8x faster; level 5 decodes about 2.6x faster. Do not read this as a measured
+  win over Windows; run it on the target machine.
+* **lzo-rle**, zram's other common default, was not built or measured here.
+* On the three page-cache runs in `amdcf ramsim` (Python objects, text, mixed heap; 288 MiB): RAM saved 66.7% at level 1,
+  71.5% at level 3, 73.9% at level 5, 76.8% at level 6.
+
+Reproduce: `LZ4=/path/to/lz4/lib ZSTD=/path/to/zstd/lib bench/bench_pages.sh FILE...` (lz4/zstd optional).
+
+Tests: round trips over 12 page shapes x 10 sizes x 4 levels, a naive reference decoder compared against the fast decoder,
+54,000 randomly corrupted blobs checked for guard-byte integrity, all under ASan + UBSan in `make sanitize`.
+
 ## What this does NOT do: "optimizing Windows by compressing its RAM"
 
 Be clear about the limits before relying on this for that goal:
