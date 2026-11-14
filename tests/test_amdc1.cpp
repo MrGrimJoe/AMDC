@@ -106,12 +106,12 @@ static void test_malformed() {
     for (size_t cut : {size_t(0), size_t(3), size_t(8), blob.size() - 1}) CHECK(throws(Bytes(blob.begin(), blob.begin() + cut)));
     Bytes g = blob; g.push_back('x'); CHECK(throws(g));
     Bytes m = blob; m[0] = 'N'; CHECK(throws(m));
-    Bytes old = blob; old[4] = 2; CHECK(throws(old));                       // unsupported version (v2 archives are not readable)
-    Bytes huge = {'A', 'M', 'D', 'C', 3, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 1, 1, 1, 0, 0, 0, 0, 0};
+    Bytes old = blob; old[4] = 3; CHECK(throws(old));                       // unsupported version (v3 archives are not readable)
+    Bytes huge = {'A', 'M', 'D', 'C', 4, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 1, 1, 1, 0, 0, 0, 0, 0};
     CHECK(throws(huge));
     CHECK(throws(blob, 10));
     // implausible expansion: tiny payload claiming a 100 MB block must be refused before any allocation
-    Bytes bomb = {'A', 'M', 'D', 'C', 3};
+    Bytes bomb = {'A', 'M', 'D', 'C', 4};
     uint64_t n = 100000000;
     Bytes body;
     auto vi = [&](Bytes& o, uint64_t v) { while (v >= 0x80) { o.push_back(uint8_t(v | 0x80)); v >>= 7; } o.push_back(uint8_t(v)); };

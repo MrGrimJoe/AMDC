@@ -1,7 +1,7 @@
-"""AMDC-1 archive container (spec v1.3 section 7).
+"""AMDC-1 archive container (spec v1.4 section 7).
 
 Layout (all integers unsigned LEB128 varints unless noted):
-    "AMDC" | version u8 (=3) | orig_len | block_size | block records... | CRC32 (u32 LE)
+    "AMDC" | version u8 (=4) | orig_len | block_size | block records... | CRC32 (u32 LE)
 Block record:
     method u8: 0 = raw  -> raw_len | bytes
                1 = CM   -> raw_len | xf u8 | [k | hdr,w,h,ch,ct] | s | cfg u8 | payload_len | payload
@@ -15,7 +15,7 @@ from . import transforms as tf
 from .cm import cm_decode, cm_encode
 
 MAGIC = b"AMDC"
-VERSION = 3
+VERSION = 4
 DEFAULT_BLOCK = 16 << 20
 DEFAULT_MEMBITS = 22
 MIN_MEMBITS, MAX_MEMBITS = 16, 24

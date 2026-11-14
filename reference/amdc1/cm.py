@@ -1,6 +1,6 @@
-"""AMDC-1 context-mixing core (format v3): nibble-local hashed context slots with check bytes,
-12 context models, two match models, three mixers + learned second layer, two APM stages,
-32-bit binary arithmetic coder with 16-bit probabilities.
+"""AMDC-1 context-mixing core (format v4): nibble-local hashed context slots with check bytes, 15 context models
+(12 with bit-history states mapped through adaptive state maps), two match models, four mixers + learned second
+layer, two APM stages, 32-bit binary arithmetic coder with 16-bit probabilities.
 
 Everything here is integer-only and therefore bit-exact across platforms and with the C++ implementation.
 Encoder and decoder share one loop (`_run`) so they cannot drift apart.
@@ -13,16 +13,17 @@ M64 = (1 << 64) - 1
 K64 = 0x9E3779B97F4A7C15
 K2 = 0xD6E8FEB86659FD93
 
-NM = 12                      # hashed context models
+NM = 15                      # hashed context models
 NMM = 2                      # match models
-NX = NM + NMM                # model inputs
-NIN = 16                     # padded input vector: NX inputs, bias at NX, zero pad
-LIM = (250, 250, 250, 120, 60, 60, 60, 60, 120, 120, 120, 120)   # adaptation-count limits
+LIM = (250, 250, 250, 120, 60, 60, 60, 60, 120, 120, 120, 120, 120, 120, 120)   # adaptation-count limits
+INDM = (False, False, False) + (True,) * 12                                      # models with bit histories
 MMIN = (5, 12)               # minimum verified match length per match model
 MVER = (32, 48)              # verification depth per match model
 INITW = 1228                 # initial mixer weight (1.0 = 2^13)
-LR6 = 6                      # first-layer error scale
-LRF = 3                      # second-layer learning rate
+LRMIN, LRBOOST, LRHALF = 8, 60, 8192   # mixer learning rate (1/8 units): LRMIN + LRBOOST*LRHALF/(LRHALF+t)
+LRLITE = 48                  # lite profile: fixed rate
+LRF = 1                      # second-layer learning rate
+SMLIM = 255                  # state-map adaptation limit
 ACT_FULL = tuple(range(NM))
 ACT_LITE = (1, 2, 3, 4, 6, 9)
 
@@ -54,6 +55,48 @@ for _i in range(_pi, 4096):
 RECIP = [(65536 * 2) // (2 * n + 3) for n in range(256)]
 
 
+def _build_history_machine():
+    """Bit-history states (n0, n1, last bit): bounded counts, opposite count discounted on each observation.
+    Generated breadth-first from the empty history so the numbering matches every other implementation."""
+    limt = (41, 24, 12, 8, 6, 5)
+
+    def step(n0, n1, b):
+        if b:
+            n1 += 1
+            if n0 > 2:
+                n0 = 2 + (n0 - 2) // 2
+        else:
+            n0 += 1
+            if n1 > 2:
+                n1 = 2 + (n1 - 2) // 2
+        m = min(n0, n1)
+        lim = limt[m] if m < 6 else 5
+        n0 = min(n0, lim)
+        n1 = min(n1, lim)
+        return n0, n1, (b if (n0 > 0 and n1 > 0) else 0)
+
+    states = [(0, 0, 0)]
+    nex = []
+    q = 0
+    while q < len(states):
+        n0, n1, _ = states[q]
+        row = []
+        for b in (0, 1):
+            t = step(n0, n1, b)
+            if t not in states:
+                states.append(t)
+            row.append(states.index(t))
+        nex.append(tuple(row))
+        q += 1
+    sn = [a + b for a, b, _ in states]
+    p0 = [((2 * b + 1) * 65535) // (2 * (a + b) + 2) for a, b, _ in states]
+    return nex, sn, p0
+
+
+NEX, SN, P0 = _build_history_machine()
+assert len(NEX) <= 256
+
+
 def _clip(v):
     return 2047 if v > 2047 else -2047 if v < -2047 else v
 
@@ -68,6 +111,22 @@ def _run(n, s, data, payload, lite, membits):
         return b""
     act = ACT_LITE if lite else ACT_FULL
     nmma = 1 if lite else NMM
+    nin = 16 if lite else 32
+    # input lanes: stretch(P) of each active model, then match inputs, then bit-history inputs, then bias
+    dlane = [-1] * NM
+    ilane = [-1] * NM
+    nl = 0
+    for i in act:
+        dlane[i] = nl
+        nl += 1
+    mlane0 = nl
+    nl += nmma
+    if not lite:
+        for i in act:
+            if INDM[i]:
+                ilane[i] = nl
+                nl += 1
+    blane = nl
     tbfull = min(membits, max(16, (n * 8).bit_length() + 1))
     tbm = [tbfull] * NM
     tbm[0] = min(tbfull, 12)
@@ -79,15 +138,23 @@ def _run(n, s, data, payload, lite, membits):
     S = [None] * NM
     for i in act:
         S[i] = array('I', [32768]) * (1 << tbm[i])
+    SMP = [P0[q] for q in range(256) if q < len(P0)] + [0] * (256 - len(P0))
+    SMP = array('H', SMP * (NM * 8))
+    SMN = bytearray(NM * 8 * 256)
     MT = [array('I', [0]) * (1 << mb) for _ in range(nmma)]
-    winit = [INITW] * NX + [0] * (NIN - NX)
+    winit = [0] * nin
+    for k in range(mlane0 + nmma):
+        winit[k] = INITW
+    for k in range(mlane0 + nmma, blane):
+        winit[k] = INITW // 2
     W1 = [list(winit) for _ in range(512)]
     W2 = [list(winit) for _ in range(256)]
-    W3 = [list(winit) for _ in range(256)]
-    WF = [21845] * (256 * 3)
+    W3 = [list(winit) for _ in range(1 if lite else 256)]
+    W4 = [list(winit) for _ in range(1 if lite else 128)]
+    WF = [16384] * (256 * 4)
     row = array('H', [min(65535, _squash((j - 16) * 128) * 16) for j in range(33)])
     A = row * 65536
-    A2 = row * 65536
+    A2 = row * (1 if lite else 65536)
     MP = [[49152] * 33 for _ in range(NMM)]
     buf = bytearray(data) if enc else bytearray(n)
     out = bytearray()
@@ -97,13 +164,17 @@ def _run(n, s, data, payload, lite, membits):
         x = int.from_bytes(bytes(payload[:4]).ljust(4, b"\0"), "big")
         pos = 4
     st, sq, recip, lim = ST, SQ, RECIP, LIM
+    nex = NEX
+    sn = SN
     c8 = 0
-    wh = pwh = 0
+    wh = pwh = ppwh = 0
+    ls = pls = 0
     mptr = [0, 0]
     mlen = [0, 0]
     hbase = [0] * NM
     nbase = [0] * NM
     chk = [0] * NM
+    cv = [0] * NM
     for t in range(n):
         c1 = c8 & 0xFF
         c2 = (c8 >> 8) & 0xFF
@@ -136,25 +207,34 @@ def _run(n, s, data, payload, lite, membits):
                                 mlen[j] = ln
                                 mptr[j] = cand
                     MT[j][h] = t
-        pb0 = buf[mptr[0]] if mlen[0] else -1
-        pb1 = buf[mptr[1]] if mlen[1] else -1
-        pb = (pb0, pb1)
+        pb = (buf[mptr[0]] if mlen[0] else -1, buf[mptr[1]] if mlen[1] else -1)
         # ---- contexts
         if s:
             a = buf[t - s] if t >= s else 0
             b2 = buf[t - 2 * s] if t >= 2 * s else 0
+            b3 = buf[t - 3 * s] if t >= 3 * s else 0
             al = buf[t - s - 1] if t >= s + 1 else 0
+            ar = buf[t - s + 1] if (s >= 2 and t + 1 >= s) else 0
             cx9 = (a << 8) | c1
             cx10 = (a << 8) | b2
             cx11 = (a << 16) | (al << 8) | c1
+            cx12 = (a << 16) | (b2 << 8) | b3
+            cx13 = (al << 16) | (a << 8) | ar
+            cx14 = (c1 << 16) | (c2 << 8) | a
         else:
+            col = t - ls
+            above = buf[pls + col] if pls + col < ls else 0
             cx9 = ((wh << 8) | c1) if wh else (c1 | 0x1000000000)
             cx10 = (c8 >> 8) & 0xFFFF
             cx11 = ((pwh << 32) | wh) if wh else ((pwh << 8) | c1 | 0x2000000000000)
+            cx12 = ((((ppwh << 32) | pwh) * K2) + wh) & M64
+            cx13 = (above << 8) | c1 | 0x3000000
+            cx14 = (c8 >> 8) & 0xFFFFFF
         ctxs = (0, c1, c8 & 0xFFFF, c8 & 0xFFFFFF, c8 & 0xFFFFFFFF, c8 & 0xFFFFFFFFFF,
-                c8 & 0xFFFFFFFFFFFF, c8, c1 | ((c8 >> 8) & 0xFF00), cx9, cx10, cx11)
+                c8 & 0xFFFFFFFFFFFF, c8, c1 | ((c8 >> 8) & 0xFF00), cx9, cx10, cx11, cx12, cx13, cx14)
         for i in act:
             hbase[i] = ((ctxs[i] + 1 + i * 0x10001) * K64) & M64
+        lrq = LRLITE if lite else LRMIN + (LRBOOST * LRHALF) // (LRHALF + t)
         c0 = 1
         byte = buf[t] if enc else 0
         for bp in (7, 6, 5, 4, 3, 2, 1, 0):
@@ -164,7 +244,7 @@ def _run(n, s, data, payload, lite, membits):
                     nbase[i] = (xh >> shm[i]) & ~15
                     chk[i] = (xh >> (shm[i] - 8)) & 0xFF
             node = c0 if bp >= 4 else ((c0 & ((1 << (3 - bp)) - 1)) | (1 << (3 - bp)))
-            xs = [0] * NIN
+            xs = [0] * nin
             cells = []
             for i in act:
                 tbl = S[i]
@@ -174,8 +254,14 @@ def _run(n, s, data, payload, lite, membits):
                 if (c >> 24) != ck:
                     c = 32768 | (ck << 24)
                     tbl[idx] = c
-                cells.append((i, tbl, idx))
-                xs[i] = st[(c & 0xFFFF) >> 4]
+                cv[i] = c
+                xs[dlane[i]] = st[(c & 0xFFFF) >> 4]
+                if not lite and INDM[i]:
+                    sidx = (i * 8 + bp) * 256 + ((c >> 16) & 0xFF)
+                    xs[ilane[i]] = st[SMP[sidx] >> 4]
+                    cells.append((i, tbl, idx, sidx))
+                else:
+                    cells.append((i, tbl, idx, -1))
             flag = [0, 0]
             eb = [0, 0]
             mi = [0, 0]
@@ -185,25 +271,29 @@ def _run(n, s, data, payload, lite, membits):
                     ml = mlen[j]
                     mi[j] = ml if ml < 16 else min(16 + ((ml - 16) >> 2), 32)
                     sm = st[MP[j][mi[j]] >> 4]
-                    xs[NM + j] = sm if eb[j] else -sm
+                    xs[mlane0 + j] = sm if eb[j] else -sm
                     flag[j] = 1
-            xs[NX] = 256
+            xs[blane] = 256
             wi1 = c0 * 2 + flag[0]
             w1 = W1[wi1]
             w2 = W2[c1]
-            d1 = sum(map(mul, w1, xs)) >> 13
-            d2 = sum(map(mul, w2, xs)) >> 13
-            d1 = _clip(d1)
-            d2 = _clip(d2)
+            d1 = _clip(sum(map(mul, w1, xs)) >> 13)
+            d2 = _clip(sum(map(mul, w2, xs)) >> 13)
             if not lite:
                 w3 = W3[c2]
+                seen = 0
+                for k in range(2, 8):
+                    seen = seen * 2 + (1 if ((cv[k] >> 16) & 0xFF) != 0 else 0)
+                wi4 = seen * 2 + flag[0]
+                w4 = W4[wi4]
                 d3 = _clip(sum(map(mul, w3, xs)) >> 13)
-                fb = c0 * 3
-                dm = _clip((WF[fb] * d1 + WF[fb + 1] * d2 + WF[fb + 2] * d3) >> 16)
+                d4 = _clip(sum(map(mul, w4, xs)) >> 13)
+                fb = c0 * 4
+                dm = _clip((WF[fb] * d1 + WF[fb + 1] * d2 + WF[fb + 2] * d3 + WF[fb + 3] * d4) >> 16)
                 p3 = sq[d3 + 2048]
+                p4 = sq[d4 + 2048]
             else:
                 dm = (d1 + d2) >> 1
-                p3 = 0
             p1 = sq[d1 + 2048]
             p2 = sq[d2 + 2048]
             pm = sq[dm + 2048]
@@ -243,24 +333,41 @@ def _run(n, s, data, payload, lite, membits):
                 x2 = ((x2 << 8) & M32) | 255
             # ---- updates
             tgt12 = bit << 12
-            e1 = (tgt12 - p1) * LR6
-            e2 = (tgt12 - p2) * LR6
+            e1 = ((tgt12 - p1) * lrq) >> 3
+            e2 = ((tgt12 - p2) * lrq) >> 3
             W1[wi1] = [_sat(wv + ((xv * e1 + 32768) >> 16)) for wv, xv in zip(w1, xs)]
             W2[c1] = [_sat(wv + ((xv * e2 + 32768) >> 16)) for wv, xv in zip(w2, xs)]
             if not lite:
-                e3 = (tgt12 - p3) * LR6
+                e3 = ((tgt12 - p3) * lrq) >> 3
+                e4 = ((tgt12 - p4) * lrq) >> 3
                 W3[c2] = [_sat(wv + ((xv * e3 + 32768) >> 16)) for wv, xv in zip(w3, xs)]
+                W4[wi4] = [_sat(wv + ((xv * e4 + 32768) >> 16)) for wv, xv in zip(w4, xs)]
                 ef = (tgt12 - pm) * LRF
                 WF[fb] += (d1 * ef) >> 14
                 WF[fb + 1] += (d2 * ef) >> 14
                 WF[fb + 2] += (d3 * ef) >> 14
+                WF[fb + 3] += (d4 * ef) >> 14
             tgt16 = bit << 16
-            for i, tbl, idx in cells:
+            tgs = 65535 if bit else 0
+            for i, tbl, idx, sidx in cells:
                 cell = tbl[idx]
                 pp = cell & 0xFFFF
-                cn = (cell >> 16) & 0xFF
-                npv = pp + (((tgt16 - pp) * recip[cn]) >> 16)
-                tbl[idx] = (cell & 0xFF000000) | npv | ((cn + 1 if cn < lim[i] else cn) << 16)
+                if sidx >= 0:
+                    stt = (cell >> 16) & 0xFF
+                    cn = sn[stt]
+                    if cn > lim[i]:
+                        cn = lim[i]
+                    npv = pp + (((tgt16 - pp) * recip[cn]) >> 16)
+                    tbl[idx] = (cell & 0xFF000000) | npv | (nex[stt][bit] << 16)
+                    sp = SMP[sidx]
+                    sc = SMN[sidx]
+                    SMP[sidx] = sp + (((tgs - sp) * recip[sc]) >> 16)
+                    if sc < SMLIM:
+                        SMN[sidx] = sc + 1
+                else:
+                    cn = (cell >> 16) & 0xFF
+                    npv = pp + (((tgt16 - pp) * recip[cn]) >> 16)
+                    tbl[idx] = (cell & 0xFF000000) | npv | ((cn + 1 if cn < lim[i] else cn) << 16)
             tgt, rnd = (65535, 63) if bit else (0, 0)
             A[ai] += (tgt - A[ai] + rnd) >> 6
             A[ai + 1] += (tgt - A[ai + 1] + rnd) >> 6
@@ -275,11 +382,15 @@ def _run(n, s, data, payload, lite, membits):
         if not enc:
             buf[t] = byte
         c8 = ((c8 << 8) | byte) & M64
+        if byte == 10:
+            pls = ls
+            ls = t + 1
         if s == 0:
             if byte >= 128 or 48 <= byte <= 57 or 65 <= byte <= 90 or 97 <= byte <= 122:
                 wh = (wh * 0x2F0B4A27 + byte + 1) & M32
             else:
                 if wh:
+                    ppwh = pwh
                     pwh = wh
                 wh = 0
     if enc:

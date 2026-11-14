@@ -32,6 +32,23 @@ TOOLS = {
                    [os.path.join(B, "amdc1"), "decompress", "-j", "1", "{i}", "{o}"], "file"),
 }
 
+# Level sweeps for speed/ratio frontier studies (name -> same templates as above)
+for _l in (1, 3, 5, 7, 9, 12, 15, 19):
+    TOOLS["zstd-%d" % _l] = (["zstd", "-%d" % _l, "-T1", "-q", "-c", "{i}"], ["zstd", "-dc", "{i}"], "stdout")
+for _l in (1, 3, 6, 9):
+    TOOLS["lz4-%d" % _l] = (["lz4", "-%d" % _l, "-q", "-c", "{i}"], ["lz4", "-dc", "{i}"], "stdout")
+for _l in (1, 3, 5, 7, 9):
+    TOOLS["brotli-%d" % _l] = (["brotli", "-q", str(_l), "-w", "24", "-c", "{i}"], ["brotli", "-dc", "{i}"], "stdout")
+for _l in (0, 1, 3, 6):
+    TOOLS["xz-%d" % _l] = (["xz", "-%d" % _l, "-T1", "-c", "{i}"], ["xz", "-dc", "{i}"], "stdout")
+for _l in (1, 6):
+    TOOLS["gzip-%d" % _l] = (["gzip", "-%d" % _l, "-c", "{i}"], ["gzip", "-dc", "{i}"], "stdout")
+TOOLS["amdcb"] = ([os.path.join(B, "amdcb"), "compress", "-j", "1", "{i}", "{o}"],
+                  [os.path.join(B, "amdcb"), "decompress", "-j", "1", "{i}", "{o}"], "file")
+TOOLS["bzip2-1"] = (["bzip2", "-1", "-c", "{i}"], ["bzip2", "-dc", "{i}"], "stdout")
+TOOLS["amdcf-1"] = ([os.path.join(B, "amdcf"), "compress", "-l", "1", "-j", "1", "{i}", "{o}"],
+                    [os.path.join(B, "amdcf"), "decompress", "-j", "1", "{i}", "{o}"], "file")
+
 
 def sha(p):
     h = hashlib.sha256()

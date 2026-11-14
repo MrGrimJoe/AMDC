@@ -1,7 +1,7 @@
 """AMDC-1: adaptive multi-model lossless data compression (reference implementation)."""
 from .container import FormatError, decode_file, encode_file
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 
 def compress(data, block_size=16 << 20, level=1, membits=22):

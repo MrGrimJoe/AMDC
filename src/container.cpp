@@ -11,7 +11,7 @@ namespace amdc1 {
 namespace {
 
 constexpr uint8_t MAGIC[4] = {'A', 'M', 'D', 'C'};
-constexpr uint8_t VERSION = 3;
+constexpr uint8_t VERSION = 4;
 constexpr uint64_t MAX_BLOCK = uint64_t(1) << 28;
 constexpr uint64_t MAX_STRIDE = uint64_t(1) << 24;
 constexpr uint64_t MAX_RATIO = 16384;

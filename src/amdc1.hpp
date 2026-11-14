@@ -1,4 +1,4 @@
-// AMDC-1 v1.3 (format version 3) -- adaptive multi-model lossless compression (C++17 reference implementation)
+// AMDC-1 v1.4 (format version 4) -- adaptive multi-model lossless compression (C++17 reference implementation)
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -18,8 +18,8 @@ constexpr int kDefaultMemBits = 22;                  // log2 slots per large mod
 constexpr int kMinMemBits = 16, kMaxMemBits = 24;
 
 // Model configuration stored in every compressed block.
-//   lite    : 0 = full model (12 context models, 2 match models, 3 mixers + 2nd layer, 2 APMs)
-//             1 = lite model (6 context models, 1 match model, 2 mixers, 1 APM): about 2x faster, a few percent larger
+//   lite    : 0 = full model (15 context models, 12 with bit histories, 2 match models, 4 mixers + 2nd layer, 2 APMs)
+//             1 = lite model (6 context models, 1 match model, 2 mixers, 1 APM): about 3x faster, several percent larger
 //   membits : log2 of slots per large context table; bounds memory (about 10 tables x 4 B x 2^membits full, 5 lite)
 struct CmCfg { uint8_t lite = 0; uint8_t membits = kDefaultMemBits; };
 

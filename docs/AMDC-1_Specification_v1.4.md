@@ -1,10 +1,10 @@
-# AMDC-1 v1.3 (format version 3): Adaptive Multi-Model Data Compression
+# AMDC-1 v1.4 (format version 4): Adaptive Multi-Model Data Compression
 
 **Status:** implemented (C++17 + independent Python reference), tested, benchmarked on the Silesia corpus against common compressors.
 **Objective:** exact lossless reconstruction, smallest measured archive.
 **Lossy mode:** out of scope for this version (see section 10).
 
-This revises the v1.0 research specification (format versions 1 and 2 are no longer readable). Section 11 lists every change and why. Everything marked **normative** is
+This revises the v1.0 research specification (format versions 1 to 3 are no longer readable). Section 11 lists every change and why. Everything marked **normative** is
 implemented identically in `src/` (C++) and `reference/amdc1/` (Python); the test suite requires the two to produce
 byte-identical archives for the same input and settings.
 
@@ -38,9 +38,9 @@ regression is covered by tests.)
 ## 3. Probability model (normative)
 
 The model decomposes each byte into 8 binary decisions and mixes many causal experts in the logistic domain (the PAQ/lpaq
-family). Format version 3 keeps the v1.2 idea and changes the machinery: hash-verified, cache-local context slots, twelve
-context models, two match models, a two-layer mixer network, and two APM stages, with a *lite* profile for speed. The clean
-$\log_2 K$ regret bound of a Bayesian mixture does **not** carry over (section 4).
+family). Format version 4 adds **bit histories** (each slot also remembers a compact history of the bits seen in its context, mapped to a
+probability by a learned state map), three more context models, a fourth mixer and a decaying mixer learning rate. A *lite* profile keeps the
+fast v3 design. The clean $\log_2 K$ regret bound of a Bayesian mixture does **not** carry over (section 4).
 
 **Arithmetic.** Integers only: no floating point anywhere in coding. Python integers are unbounded; C++ uses fixed-width
 integers sized so that no intermediate overflows (verified by the bit-exact cross-check). `>>` on negatives is arithmetic (floor).
@@ -53,30 +53,40 @@ $w=d \,\&\, 127,\; i=(d\gg7)+16,\; \mathrm{squash}=(T_i(128-w)+T_{i+1}w+64)\gg7$
 
 **Model configuration** (stored per block, section 7): `lite` (0 = full, 1 = lite) and `membits` $\in[16,24]$.
 
+**Bit-history machine.** A state is $(n_0,n_1,\ell)$: bounded counts of zeros and ones seen in the context and the last bit $\ell$ (kept only when both counts are
+non-zero, else 0). On observing bit $b$: $n_b \mathrel{+}= 1$; if the opposite count exceeds 2 it becomes $2+\lfloor(\text{opp}-2)/2\rfloor$; then with $m=\min(n_0,n_1)$ and
+$\mathrm{lim}=(41,24,12,8,6,5)[m]$ (5 for $m\ge6$) both counts are clamped to $\mathrm{lim}$; $\ell=b$ if both counts are non-zero. State 0 is $(0,0,0)$. States are numbered
+breadth first: process states in index order, for each take bit 0 then bit 1, and give each previously unseen result the next index. This yields 229 states, so a state fits in a byte.
+`sn[q]` $=n_0+n_1$ and the initial state-map probability is `p0[q] = ((2n_1+1)*65535) // (2(n_0+n_1)+2)`.
+
 **Context models.** With $c_1,c_2,\dots$ the previous bytes, $c_8$ the last 8 bytes as a 64-bit integer, stride $s$ (a block
-parameter), $wh$ the hash of the current word and $pwh$ the hash of the previous word:
+parameter), $wh$ the hash of the current word, $pwh$, $ppwh$ the hashes of the previous two words, $ls$ and $pls$ the start offsets of the current and previous line
+(a line starts after byte 10), and $x_{t-k}$ the byte $k$ positions back:
 
-| model | context | count limit | in lite |
-|---|---|---|---|
-| 0 | none (order 0) | 250 | |
-| 1 | $c_1$ | 250 | yes |
-| 2 | $c_1c_2$ | 250 | yes |
-| 3 | order 3 | 120 | yes |
-| 4 | order 4 | 60 | yes |
-| 5 | order 5 | 60 | |
-| 6 | order 6 | 60 | yes |
-| 7 | order 8 (all of $c_8$) | 60 | |
-| 8 | sparse $(c_1, c_3)$ | 120 | |
-| 9 | $s>0$: $(x_{t-s}, c_1)$; $s=0$: $(wh, c_1)$ (or $c_1$ alone, tagged, outside a word) | 120 | yes |
-| 10 | $s>0$: $(x_{t-s}, x_{t-2s})$; $s=0$: $(c_2c_3)$ | 120 | |
-| 11 | $s>0$: $(x_{t-s}, x_{t-s-1}, c_1)$; $s=0$: $(pwh, wh)$ inside a word, else $(pwh, c_1)$ tagged | 120 | |
+| model | context | count limit | history | in lite |
+|---|---|---|---|---|
+| 0 | none (order 0) | 250 | no | |
+| 1 | $c_1$ | 250 | no | yes |
+| 2 | $c_1c_2$ | 250 | no | yes |
+| 3 | order 3 | 120 | yes | yes (counter only) |
+| 4 | order 4 | 60 | yes | yes (counter only) |
+| 5 | order 5 | 60 | yes | |
+| 6 | order 6 | 60 | yes | yes (counter only) |
+| 7 | order 8 (all of $c_8$) | 60 | yes | |
+| 8 | sparse $(c_1, c_3)$ | 120 | yes | |
+| 9 | $s>0$: $(x_{t-s}, c_1)$; $s=0$: $(wh, c_1)$ (or $c_1$ alone, tagged, outside a word) | 120 | yes | yes (counter only) |
+| 10 | $s>0$: $(x_{t-s}, x_{t-2s})$; $s=0$: $(c_2c_3)$ | 120 | yes | |
+| 11 | $s>0$: $(x_{t-s}, x_{t-s-1}, c_1)$; $s=0$: $(pwh, wh)$ inside a word, else $(pwh, c_1)$ tagged | 120 | yes | |
+| 12 | $s>0$: $(x_{t-s}, x_{t-2s}, x_{t-3s})$; $s=0$: word trigram $((ppwh\ll32\,|\,pwh)\cdot K_2+wh) \bmod 2^{64}$ | 120 | yes | |
+| 13 | $s>0$: $(x_{t-s-1}, x_{t-s}, x_{t-s+1})$ (last term 0 unless $s\ge2$); $s=0$: (byte at the same column of the previous line, $c_1$), tagged | 120 | yes | |
+| 14 | $s>0$: $(c_1, c_2, x_{t-s})$; $s=0$: $(c_2c_3c_4)$ | 120 | yes | |
 
-(Out-of-range history reads as 0. Word hash: `wh = wh*0x2F0B4A27 + byte + 1 mod 2^32` over runs of letters, digits and bytes
-$\ge128$; at the first other byte, `pwh = wh` if `wh` is non-zero, then `wh = 0`. Exact tags: model 9 outside a word uses
-$c_1\,|\,\mathrm{0x1000000000}$; model 11 outside a word uses $(pwh\ll8)\,|\,c_1\,|\,\mathrm{0x2000000000000}$.)
+(Out-of-range history reads as 0. The column byte is $x_{pls+(t-ls)}$ if $pls+(t-ls)<ls$, else 0. Word hash: `wh = wh*0x2F0B4A27 + byte + 1 mod 2^32` over runs of letters, digits and bytes
+$\ge128$; at the first other byte, if `wh` is non-zero then `ppwh = pwh`, `pwh = wh`; then `wh = 0`. Tags: model 9 outside a word uses
+$c_1\,|\,\mathrm{0x1000000000}$; model 11 outside a word uses $(pwh\ll8)\,|\,c_1\,|\,\mathrm{0x2000000000000}$; model 13 ($s=0$) uses $(above\ll8)\,|\,c_1\,|\,\mathrm{0x3000000}$.)
 
-**Slots.** Each model owns a table of $2^{tb_i}$ 32-bit slots: probability `P` (bits 0-15, init 32768), adaptation count `C`
-(bits 16-23, init 0) and a check byte (bits 24-31, init 0). $tb=\min(\mathrm{membits},\max(16,\mathrm{bitlen}(8n)+1))$, with
+**Slots.** Each model owns a table of $2^{tb_i}$ 32-bit slots: probability `P` (bits 0-15, init 32768), a field `F` (bits 16-23, init 0) and a check byte (bits 24-31, init 0).
+`F` is an adaptation count for models 0-2 and in the lite profile, and a bit-history state for models 3-14 in the full profile. $tb=\min(\mathrm{membits},\max(16,\mathrm{bitlen}(8n)+1))$, with
 $tb_0=\min(tb,12)$, $tb_1=\min(tb,19)$ and $tb_i=tb$ otherwise. Only the models active in the profile allocate a table.
 
 **Addressing (nibble-local).** For model $i$ with context value $v$: $h=\big((v+1+i\cdot 0x10001)\cdot K\big) \bmod 2^{64}$,
@@ -85,12 +95,16 @@ $x_h=\big((h+c_0\cdot K_2)\bmod 2^{64}\cdot K\big)\bmod2^{64}$ for the low nibbl
 leading 1, so 16..31; $K_2=\mathrm{0xD6E8FEB86659FD93}$). Then `base = (x_h >> (64-tb_i)) & ~15` and
 `chk = (x_h >> (64-tb_i-8)) & 255`. The slot for a bit is `(base + node) & (2^{tb_i}-1)` where `node` $\in[1,15]$ is the
 position in the 4-level binary tree of the current nibble ($c_0$ itself for the high nibble; for the low nibble
-$(c_0 \,\&\, (2^{3-bp}-1))\,|\,2^{3-bp}$). All 15 slots of a nibble therefore share one 64-byte line (two cache misses per byte per model).
-**Collision handling:** if a slot's check byte differs from `chk`, the slot is reset to $P=32768, C=0$ with the new check before use
-(always replace).
+$(c_0 \,\&\, (2^{3-bp}-1))\,|\,2^{3-bp}$). All 15 slots of a nibble share one 64-byte line. **Collision handling:** if a slot's check byte differs from `chk`,
+the slot is reset to $P=32768, F=0$ with the new check before use (always replace).
 
-**Counter update** after coding bit $b$: `P += (((b<<16) - P) * recip[C]) >> 16`; `C` increments up to the model's limit. The
-check byte is preserved. The model input is `stretch[P>>4]`.
+**Update** after coding bit $b$. Direct slots (`F` = count $C$): `P += (((b<<16) - P) * recip[C]) >> 16`; `C` increments up to the model's limit. History slots:
+$cn=\min(sn[F],\mathrm{limit}_i)$; `P += (((b<<16) - P) * recip[cn]) >> 16`; `F = nex[F][b]`. The check byte is preserved.
+
+**State maps.** For every history model $i$ and bit position $bp$ there is a table `SMP[(i*8+bp)*256 + state]` (16-bit, init `p0[state]`) with a count `SMN` (init 0). The state-map probability of the
+state *before* the update is the model's second input, `stretch[SMP>>4]`; after the bit, `SMP += ((tgt - SMP) * recip[SMN]) >> 16` with $tgt=65535$ for a 1, 0 for a 0, and `SMN` increments up to 255.
+
+**Model inputs.** `stretch[P>>4]` of every active model; one input per active match model; the state-map input of every history model; the bias 256. (Lane order is an implementation detail: the sums are exact integers.)
 
 **Match models.** Two, each with a table of $2^{mb}$ positions, $mb=\min(22,\max(12,\mathrm{bitlen}(n)+1))$. Model M0:
 minimum length 5, key $((c_8\,\&\,2^{40}-1)\cdot K \bmod 2^{64})\gg(64-mb)$, verification depth 32. Model M1: minimum length 12,
@@ -101,13 +115,13 @@ While the predicted byte agrees with the bits coded so far, a model contributes 
 bucket $=\mathrm{len}$ for $<16$, else $\min(16+((\mathrm{len}-16)\gg2),32)$. Each model has its own `MP` (init 49152), updated
 `+= ((hit<<16)-MP) >> 6`.
 
-**Mixer network.** The input vector has 16 lanes: lanes 0-11 the model stretches (0 for inactive models), lanes 12-13 the
-match inputs, lane 14 the bias 256, lane 15 zero. First layer: three weight sets (int16, $1.0=2^{13}$, initial 1228 for lanes 0-13,
-0 otherwise): A selected by $(c_0, \text{M0 active})$ (512 sets), B by $c_1$ (256), C by $c_2$ (256). Each yields
-$d_k=\mathrm{clamp}_{\pm2047}((\sum w_ix_i)\gg13)$ and $p_k=\mathrm{squash}(d_k)$. After the bit, set $k$ trains on its own error:
-$e_k=((b\ll12)-p_k)\cdot6$, $w_i \leftarrow \mathrm{sat}_{16}(w_i+((x_ie_k+32768)\gg16))$. Second layer: three weights (1.0 = 65536, initial 21845)
+**Mixer network.** First layer: four weight sets (int16, $1.0=2^{13}$, saturating), each a dot product over the input vector: A selected by $(c_0, \text{M0 active})$ (512 sets), B by $c_1$ (256),
+C by $c_2$ (256), D by $(\text{seen}\cdot2+\text{M0 active})$ (128 sets) where `seen` is a 6-bit mask, one bit per model 2..7 in order, set when that model's field `F` is non-zero (the context has been seen before).
+Initial weights: 1228 for model and match inputs, 614 for history inputs, 0 for the bias. Each yields $d_k=\mathrm{clamp}_{\pm2047}((\sum w_ix_i)\gg13)$ and $p_k=\mathrm{squash}(d_k)$.
+After the bit, set $k$ trains on its own error with a decaying rate: $lrq=8+\lfloor 60\cdot8192/(8192+t)\rfloor$ ($t$ = byte index; the lite profile uses a fixed 48),
+$e_k=(((b\ll12)-p_k)\cdot lrq)\gg3$, $w_i \leftarrow \mathrm{sat}_{16}(w_i+((x_ie_k+32768)\gg16))$. Second layer: four weights (1.0 = 65536, initial 16384)
 selected by $c_0$: $d=\mathrm{clamp}_{\pm2047}((\sum_k wf_kd_k)\gg16)$, $p_m=\mathrm{squash}(d)$; trained with
-$e_f=((b\ll12)-p_m)\cdot3$, $wf_k \mathrel{+}= (d_ke_f)\gg14$.
+$e_f=(b\ll12)-p_m$, $wf_k \mathrel{+}= (d_ke_f)\gg14$.
 
 **APM / SSE stages.** Two tables of $65536\times33$ 16-bit values, each row initialised to $\min(65535,16\cdot\mathrm{squash}(128(j-16)))$.
 With $v=d+2048$, $a=v\gg7$, $f=v\,\&\,127$: $p_{a1}$ interpolates table 1 at row $(c_1\ll8\,|\,c_0)$ and $p_{a2}$ interpolates table 2 at row
@@ -115,9 +129,9 @@ $\big(((((c_8\,\&\,\mathrm{0xFFFF})\ll8)\,|\,c_0)\cdot K) \bmod 2^{64}\big)\gg48
 $p=\mathrm{clamp}_{[4,65532]}\big((32p_m+3p_{a1}+3p_{a2}+4)\gg3\big)$. After the bit, the two touched cells of each table move toward the outcome:
 $A \mathrel{+}= (\mathrm{tgt}-A+\mathrm{rnd})\gg6$ with $(\mathrm{tgt},\mathrm{rnd})=(65535,63)$ for a 1 and $(0,0)$ for a 0.
 
-**Lite profile** (`lite = 1`): active models 1, 2, 3, 4, 6, 9; match model M0 only; mixer sets A and B only with
-$d=(d_A+d_B)\gg1$ (no second layer, no set C); one APM (table 1) with $p=\mathrm{clamp}_{[4,65532]}((16p_m+3p_{a1}+2)\gg2)$.
-It runs about 2.3x faster than the full profile at a few percent larger size (section 12).
+**Lite profile** (`lite = 1`): active models 1, 2, 3, 4, 6, 9, all with plain counters (no bit histories, no state maps); match model M0 only; mixer sets A and B only with
+$d=(d_A+d_B)\gg1$ (no second layer, no sets C and D), fixed learning rate 48; one APM (table 1) with $p=\mathrm{clamp}_{[4,65532]}((16p_m+3p_{a1}+2)\gg2)$.
+Adding bit histories to lite gained only 1% for 20% more time, so lite stays on direct counters. It runs about 3x faster than the full profile (section 12).
 
 ## 4. What is and is not guaranteed
 
@@ -162,7 +176,7 @@ miss the best candidate. Encoder search policy does not affect decodability.
 ## 7. Container (normative)
 
 ```
-"AMDC" | version u8 = 3 | orig_len | block_size | block records | CRC-32 of original (u32 little-endian)
+"AMDC" | version u8 = 4 | orig_len | block_size | block records | CRC-32 of original (u32 little-endian)
 record:  0 | raw_len | bytes                                   (raw)
          1 | raw_len | xf u8 | params | s | cfg u8 | payload_len | payload   (context-mixed)
 params:  xf 1,2,3 -> k ; xf 4 -> hdr_len, w, h, channels, colour_transform ; xf 0, 5 -> none
@@ -222,6 +236,20 @@ rate-distortion objective $J=R+\lambda D$ whose distortion measure must be valid
 5. Decoder expansion guard raised from 4096:1 to 16384:1 to admit the new floor. Version byte is now 2; version 1 archives are rejected.
 6. Stage 1–3 gains were measured on the tuning corpus; section 12 reports a separate held-out corpus.
 
+### Changes from v1.3 (format version 3 → 4)
+
+Measured on 1.5 MiB slices of the 12 Silesia files with the raw model unless stated (v1.3 model: 5,428,676 bytes in total). Text subset = `dickens`, `reymont`, `webster`, `xml`, `nci`.
+
+1. **Bit histories** on 12 of the 15 models (section 3): 229-state machine per slot, adaptive state maps keyed by (model, bit position, state), added as extra mixer inputs. −1.7% on the text subset.
+2. **Mixer tuning:** lower learning rate with a decaying schedule, second-layer rate 1: about −0.9% on the text subset (each step was smaller than the one before; fixed rates 6 → 4 → 3 → 2 gave −0.3%, −0.4%, −0.6%).
+3. **Three more contexts** (word trigram, column byte above in the previous line, skip context $c_2c_3c_4$; stride-mode analogues for binary data): −1.5% on the text subset, and almost all of it from the column context (`nci` −10.5%, `xml` −2.3%, natural text about −0.5%).
+4. **Fourth mixer** selected by which context orders have been seen before: −0.3%. **Position-aware state maps:** −0.28%.
+5. Net effect over all 12 data types: **−2.44%** (`mozilla` −7.3%, `ooffice` −7.1%, `nci` −13.3%, `reymont` −8.3%, `xml` −5.6%, `webster` −2.3%, `dickens` −1.1%, `osdb` −1.1%, and under 0.6% on `mr`, `samba`, `sao`, `x-ray`). Cost: about 40% lower throughput of the full profile.
+6. On the dev set (first 3 MiB of each file) the real binary went from 27.285% to **26.747%**, level with zpaq -m5 (26.741%) there; the full-corpus comparison is in section 12.
+7. The lite profile is unchanged (same sizes, same speed): bit histories there gained 1% for 20% more time, and the decaying learning rate made it worse (31.03% vs 30.71%), so it keeps plain counters and a fixed rate.
+8. Rejected after measurement: state-map adaptation limits (no effect), other counter limits (±0.1%), count/probability state maps instead of real bit histories (−0.24%).
+9. Format version byte is 4; versions 1 to 3 are rejected.
+
 ### Changes from v1.2 (format version 2 → 3)
 
 Gains below are measured on 1.5 MiB slices of the 12 Silesia files with the raw model (total 18.45 MB; v1.2 model = 5,529,291 bytes).
@@ -241,68 +269,69 @@ Gains below are measured on 1.5 MiB slices of the 12 Silesia files with the raw 
 
 **Protocol.** The complete Silesia corpus (12 real files, 211,938,580 bytes), downloaded from a public GitHub mirror. Every compressor runs
 single-threaded on one core of the same machine (a 2.1 GHz virtualised Xeon, which is slow: bzip2 -9 compresses at only 10 MB/s here, so compare
-the *ratios between rows*, not the absolute speeds, with other hardware). Every result is round-trip verified by SHA-256 (156 of 156 passed).
+the *ratios between rows*, not the absolute speeds, with other hardware). Every result is round-trip verified by SHA-256 (all passed).
 Total archive size includes all headers. Competitors at strong standard settings: gzip -9, bzip2 -9, xz -9e, 7z LZMA2 -mx9, zstd --ultra -22 --long=27,
-brotli -q11 -w24, lz4 -12, zpaq -method 3 and -method 5. AMDC-1 runs at its default 16 MiB blocks and `-m 22`. Reproduce with
+brotli -q11 -w24, lz4 -12, zpaq -method 3 and -method 5. AMDC-1 runs at its default 16 MiB blocks and `-m 22`; AMDC-B at its default 8 MiB blocks. Reproduce with
 `python3 bench/bench_real.py --files DIR`; the raw per-file results are in `bench/results_silesia.csv`.
 
 | tool | total bytes | ratio | compress MB/s | decompress MB/s |
 |---|---|---|---|---|
-| gzip -9 | 67,631,990 | 31.91% | 8.8 | 136 |
-| bzip2 -9 | 54,506,769 | 25.72% | 10.6 | 26 |
-| zstd -22 | 52,522,343 | 24.78% | 1.4 | 353 |
+| gzip -9 | 67,631,990 | 31.91% | 8.75 | 136 |
+| bzip2 -9 | 54,506,769 | 25.72% | 10.64 | 26 |
+| zstd -22 | 52,522,343 | 24.78% | 1.37 | 353 |
 | brotli -11 | 49,564,563 | 23.39% | 0.40 | 218 |
-| 7z LZMA2 | 48,757,480 | 23.01% | 1.7 | 61 |
-| xz -9e | 48,456,004 | 22.86% | 1.3 | 62 |
-| zpaq -m3 | 46,550,067 | 21.96% | 3.3 | 4.0 |
-| **AMDC-1 level 0 (lite)** | 45,099,637 | 21.28% | 1.13 | 1.13 |
-| **AMDC-1 level 1 (default)** | 41,913,333 | **19.78%** | 0.48 | 0.50 |
-| zpaq -m5 | **39,112,925** | **18.46%** | 0.35 | 0.35 |
-| *AMDC-F level 2 (fast format)* | 81,628,861 | 38.51% | 34 | 342 |
-| *lz4 -12* | 77,372,720 | 36.51% | 8.6 | 684 |
+| 7z LZMA2 | 48,757,480 | 23.01% | 1.71 | 61 |
+| xz -9e | 48,456,004 | 22.86% | 1.33 | 62 |
+| zpaq -m3 | 46,550,067 | 21.96% | 3.30 | 4 |
+| **AMDC-B (BWT tier, experimental)** | 49,623,662 | 23.41% | 5.08 | 10 |
+| **AMDC-1 level 0 (lite)** | 45,099,637 | 21.28% | 0.92 | 1 |
+| **AMDC-1 level 1 (default)** | 40,285,344 | 19.01% | 0.26 | 0 |
+| zpaq -m5 | 39,112,925 | 18.45% | 0.35 | 0 |
+| *AMDC-F level 2 (fast format)* | 81,628,861 | 38.52% | 34.07 | 342 |
+| *lz4 -12* | 77,372,720 | 36.51% | 8.56 | 684 |
 
 **Reading the table honestly.**
 
-* AMDC-1 level 1 is **13.5% smaller than xz -9e, 15.4% smaller than brotli -11 and 20.2% smaller than zstd -22**, and it is smaller than every mainstream tool
-  (gzip, bzip2, xz, 7z, zstd, brotli, lz4) on **all 12 files**. zpaq -m3 beats it on four files (`mr`, `nci`, `reymont`, `x-ray`).
-* **zpaq -m5 is 6.7% smaller than AMDC-1 level 1** (AMDC-1 is 7.2% larger) and wins all 12 files. Its edge is largest on text
-  (`webster` 13.67% vs 15.56%, `reymont` 14.43% vs 15.29%, `dickens` 20.55% vs 21.77%) and on `sao` (53.77% vs 54.93%). AMDC-1 is about 1.4x faster than zpaq -m5.
-  The likely cause is that zpaq's ICM/ISSE chains model *bit histories* rather than direct probabilities; a cheap stand-in (count/probability state map) gained only 0.24%, so closing this gap needs a real bit-history model.
-* **Lite is not a clear win over zpaq -m3**: it is 3.1% smaller but about 3.5x slower to decode (1.13 vs 4.0 MB/s).
-* Context mixing is symmetric: decoding is as slow as encoding, about 120x (xz), 440x (brotli) and 700x (zstd) slower than their decoding. AMDC-1 is a ratio-first codec; AMDC-F is the fast tier.
+* AMDC-1 level 1 is **16.9% smaller than xz -9e, 18.7% smaller than brotli -11 and 23.3% smaller than zstd -22**, and it is smaller than every mainstream tool
+  (gzip, bzip2, xz, 7z, zstd, brotli, lz4) on **12 of 12 files**.
+* **zpaq -m5 is still 3.0% smaller than AMDC-1 level 1** (it was 7.2% under format v3). AMDC-1 beats it on 3 files (`nci`, `sao`, `xml`); zpaq wins the other 9, mostly on text
+  (`webster` 13.67% vs 15.20%, `dickens` 20.55% vs 21.55%). AMDC-1 is about 0.8x as fast as zpaq -m5 (slightly slower).
+* **Lite is not a clear win over zpaq -m3**: it is 3.1% smaller but about 5x slower to decode (0.80 vs 4.0 MB/s).
+* Context mixing is symmetric: decoding is as slow as encoding, about 219x (xz) to 1,257x (zstd) slower than their decoding. AMDC-1 is a ratio-first codec; AMDC-F is the fast tier.
+* **AMDC-B** (BWT tier, `docs/AMDC-B_BWT_Tier.md`) is 9.0% smaller than bzip2 -9 and 2.4% *larger* than xz -9e, at 5.1 MB/s compress and 10.0 MB/s decompress per core
+  (7x xz's compress speed). It is weak on executables (no x86 filter; `mozilla` 32.7% vs xz 26.1%). It does not reach 10-100 MB/s on one core; its blocks are independent so it should scale with cores, which was **not measured** (one-core machine).
 
-| file | xz -9e | brotli-11 | zpaq -m5 | AMDC-1 L0 | AMDC-1 L1 |
-|---|---|---|---|---|---|
-| dickens | 27.78 | 27.74 | 20.55 | 22.52 | 21.77 |
-| mozilla | 26.11 | 27.08 | 23.51 | 28.56 | 25.69 |
-| mr | 27.60 | 28.32 | 21.88 | 22.22 | 22.00 |
-| nci | 4.32 | 4.53 | 3.73 | 4.60 | 3.90 |
-| ooffice | 39.45 | 40.29 | 28.71 | 32.89 | 30.41 |
-| osdb | 28.20 | 27.92 | 21.86 | 23.86 | 22.55 |
-| reymont | 19.85 | 20.10 | 14.43 | 16.76 | 15.29 |
-| samba | 17.31 | 17.43 | 14.13 | 15.98 | 15.20 |
-| sao | 61.03 | 63.24 | 53.77 | 62.22 | 54.93 |
-| webster | 20.19 | 20.33 | 13.67 | 16.18 | 15.56 |
-| x-ray | 53.00 | 55.26 | 43.30 | 45.27 | 45.10 |
-| xml | 8.14 | 8.05 | 6.12 | 6.91 | 6.26 |
+| file | xz -9e | brotli-11 | zpaq -m5 | AMDC-B | AMDC-1 L0 | AMDC-1 L1 |
+|---|---|---|---|---|---|---|
+| dickens | 27.78 | 27.74 | 20.55 | 23.91 | 22.52 | 21.55 |
+| mozilla | 26.11 | 27.08 | 23.51 | 32.73 | 28.56 | 23.99 |
+| mr | 27.60 | 28.32 | 21.88 | 23.22 | 22.22 | 21.94 |
+| nci | 4.32 | 4.53 | 3.73 | 4.17 | 4.60 | 3.67 |
+| ooffice | 39.45 | 40.29 | 28.71 | 44.26 | 32.89 | 28.81 |
+| osdb | 28.20 | 27.92 | 21.86 | 23.60 | 23.86 | 22.21 |
+| reymont | 19.85 | 20.10 | 14.43 | 15.55 | 16.76 | 14.49 |
+| samba | 17.31 | 17.43 | 14.13 | 19.03 | 15.98 | 14.28 |
+| sao | 61.03 | 63.24 | 53.77 | 66.93 | 62.22 | 53.61 |
+| webster | 20.19 | 20.33 | 13.67 | 17.70 | 16.18 | 15.20 |
+| x-ray | 53.00 | 55.26 | 43.30 | 45.72 | 45.27 | 44.99 |
+| xml | 8.14 | 8.05 | 6.12 | 7.48 | 6.91 | 5.99 |
 
 **Memory and the "on the go" settings** (first 3 MiB of `dickens`, one core, peak resident memory including the input; `-m` = `membits`):
 
 | level | `-m` | size | peak memory |
 |---|---|---|---|
-| 0 | 22 | 23.09% | 123 MB |
-| 0 | 20 | 23.69% | 63 MB |
-| 0 | 18 | 24.83% | 47 MB |
-| 0 | 16 | 26.35% | 42 MB |
-| 1 | 22 | 22.46% | 219 MB |
-| 1 | 20 | 23.08% | 99 MB |
-| 1 | 18 | 24.14% | 68 MB |
-| 1 | 16 | 25.33% | 60 MB |
+| 0 | 22 | 23.09% | 119 MB |
+| 0 | 20 | 23.68% | 59 MB |
+| 0 | 18 | 24.83% | 43 MB |
+| 0 | 16 | 26.35% | 39 MB |
+| 1 | 22 | 22.18% | 267 MB |
+| 1 | 20 | 22.87% | 111 MB |
+| 1 | 18 | 23.93% | 71 MB |
+| 1 | 16 | 25.16% | 61 MB |
+| AMDC-B | (8 MiB blocks) | 24.8% | 33 MB |
 
-`-l 0 -m 20` (63 MB) and `-l 1 -m 20` (99 MB) are the sensible small-memory points. Memory depends on `-m`, not on the block size.
+`-l 0 -m 20` (59 MB) and `-l 1 -m 20` (111 MB) are the sensible small-memory points. Memory depends on `-m`, not on the block size.
 
-**Not measured / known limits.** Silesia is one corpus and mostly large files; small-file behaviour was only spot-checked (unit tests). The old v1.2 ablation table was
-not re-run for the 12-model design (component gains are in section 11, measured on 1.5 MiB slices). Level 2 was not benchmarked on the full corpus. The 2.1 GHz virtualised core makes
-all absolute speeds pessimistic relative to a modern desktop, and phone cores were not tested.
-
-*Historical (format v2, v1.2 model, 13 small held-out files):* 13.70% vs xz 15.58%. Not comparable with the table above.
+**Not measured / known limits.** Silesia is one corpus and mostly large files; small-file behaviour was only spot-checked (unit tests). The ablation table was not re-run for the 15-model design
+(component gains are in section 11, measured on 1.5 MiB slices). Level 2 was not benchmarked on the full corpus. The 2.1 GHz virtualised core makes all absolute speeds pessimistic relative to a modern desktop,
+and phone cores were not tested. Multi-core scaling of AMDC-1 and AMDC-B was not measured (one core available).
