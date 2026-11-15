@@ -349,6 +349,15 @@ size_t page2_chain(const uint8_t* src, size_t n, uint8_t* dst) {
 namespace {
 constexpr int HUF_MAXLEN = 10;
 
+struct Rev8 {
+    uint8_t t[256];
+    Rev8() { for (int i = 0; i < 256; ++i) { unsigned r = 0; for (int b = 0; b < 8; ++b) r |= ((i >> b) & 1u) << (7 - b); t[i] = uint8_t(r); } }
+};
+inline unsigned rev_bits(unsigned c, int l) {          // reverse the low l bits of c (l <= 16)
+    static const Rev8 r8;
+    return ((unsigned(r8.t[c & 255]) << 8) | r8.t[(c >> 8) & 255]) >> (16 - l);
+}
+
 // code lengths for 256 byte frequencies; returns false if fewer than 2 symbols are used
 bool huff_lengths(const uint32_t* freq_in, uint8_t* len) {
     uint32_t freq[256];
@@ -399,8 +408,7 @@ void huff_codes(const uint8_t* len, HufEnc& e) {
     for (int i = 0; i < 256; ++i) {
         const int l = len[i];
         if (!l) { e.code[i] = 0; continue; }
-        unsigned c = next[l]++, r = 0;
-        for (int b = 0; b < l; ++b) r |= ((c >> b) & 1u) << (l - 1 - b);
+        const unsigned r = rev_bits(next[l]++, l);
         e.code[i] = uint16_t(r);
     }
 }
@@ -427,8 +435,7 @@ int huff_table(const uint8_t* len, uint16_t* tab) {
     for (int i = 0; i < 256; ++i) {
         const int l = len[i];
         if (!l) continue;
-        unsigned c = next[l]++, r = 0;
-        for (int b = 0; b < l; ++b) r |= ((c >> b) & 1u) << (l - 1 - b);
+        const unsigned r = rev_bits(next[l]++, l);
         const uint16_t ent = uint16_t(i | (l << 8));
         for (unsigned j = r; j < size; j += 1u << l) tab[j] = ent;
     }
@@ -491,18 +498,21 @@ size_t page3_huf(const uint8_t* lz2, size_t lzlen, uint8_t* out) {
     }
     for (int i = 0; i < nn; i += 2) *op++ = uint8_t(nib[i] | ((i + 1 < nn ? nib[i + 1] : 0) << 4));
     uint8_t* const hdr = op;
-    op += 6;
-    const size_t n1 = (nlit + 1) / 2;
-    BitW a{op};
-    for (size_t i = 0; i < n1; ++i) a.put(he.code[lits[i]], len[lits[i]]);
-    a.flush();
-    const size_t lenA = size_t(a.out - op);
-    BitW b{a.out};
-    for (size_t i = n1; i < nlit; ++i) b.put(he.code[lits[i]], len[lits[i]]);
-    b.flush();
-    const size_t lenB = size_t(b.out - a.out);
-    wr16(hdr, unsigned(nlit)); wr16(hdr + 2, unsigned(lenA)); wr16(hdr + 4, unsigned(lenB));
-    op = b.out;
+    op += 10;
+    // four streams over four consecutive quarters (the first three have q symbols, the last the rest)
+    const size_t q = (nlit + 3) / 4;
+    size_t slen[4];
+    uint8_t* sp = op;
+    for (int k = 0; k < 4; ++k) {
+        const size_t b0 = std::min(nlit, size_t(k) * q), b1 = std::min(nlit, size_t(k + 1) * q);
+        BitW w{sp};
+        for (size_t i = b0; i < b1; ++i) w.put(he.code[lits[i]], len[lits[i]]);
+        w.flush();
+        slen[k] = size_t(w.out - sp);
+        sp = w.out;
+    }
+    wr16(hdr, unsigned(nlit)); wr16(hdr + 2, unsigned(slen[0])); wr16(hdr + 4, unsigned(slen[1])); wr16(hdr + 6, unsigned(slen[2])); wr16(hdr + 8, unsigned(slen[3]));
+    op = sp;
     std::memcpy(op, seq, ns);
     op += ns;
     return size_t(op - out);
@@ -527,38 +537,46 @@ bool page3_unhuf(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen) {
         sym += int(r) + 1;
         if (sym > 256) return false;
     }
-    if (iend - ip < 6) return false;
-    const size_t nlit = rd16(ip), lenA = rd16(ip + 2), lenB = rd16(ip + 4);
-    ip += 6;
-    if (nlit == 0 || nlit > outlen || lenA + lenB > size_t(iend - ip)) return false;
+    if (iend - ip < 10) return false;
+    const size_t nlit = rd16(ip), l0 = rd16(ip + 2), l1 = rd16(ip + 4), l2 = rd16(ip + 6), l3 = rd16(ip + 8);
+    ip += 10;
+    if (nlit == 0 || nlit > outlen || nlit > kPage2Max || l0 + l1 + l2 + l3 > size_t(iend - ip)) return false;
     uint16_t tab[1 << HUF_MAXLEN];
     const int tb = huff_table(len, tab);
     if (!tb) return false;
     const unsigned mask = (1u << tb) - 1;
     uint8_t lit[kPage2Max + 32];
-    if (nlit > kPage2Max) return false;
-    BitR A{ip, ip + lenA, 0, 0, ip};
-    BitR B{ip + lenA, ip + lenA + lenB, 0, 0, ip + lenA};
-    const size_t n1 = (nlit + 1) / 2, n2 = nlit - n1;
-    uint8_t* const la = lit;
-    uint8_t* const lb = lit + n1;
+    const size_t q = (nlit + 3) / 4;
+    size_t cnt[4];
+    for (int k = 0; k < 4; ++k) cnt[k] = std::min(nlit, size_t(k + 1) * q) - std::min(nlit, size_t(k) * q);
+    BitR S[4] = {{ip, ip + l0, 0, 0, ip}, {ip + l0, ip + l0 + l1, 0, 0, ip + l0},
+                 {ip + l0 + l1, ip + l0 + l1 + l2, 0, 0, ip + l0 + l1}, {ip + l0 + l1 + l2, ip + l0 + l1 + l2 + l3, 0, 0, ip + l0 + l1 + l2}};
+    uint8_t* const o[4] = {lit, lit + q, lit + 2 * q, lit + 3 * q};
+    // all streams: full groups of 5 symbols (each refill leaves >= 56 bits; 5 x 10 bits fit)
+    const size_t full = std::min(std::min(cnt[0], cnt[1]), std::min(cnt[2], cnt[3])) / 5 * 5;
     size_t i = 0;
-    // each refill leaves >= 56 bits, so 5 symbols of <= 10 bits can be taken per stream before the next one
-    for (; i + 5 <= n2; i += 5) {
-        A.refill(); B.refill();
+    for (; i < full; i += 5) {
+        S[0].refill(); S[1].refill(); S[2].refill(); S[3].refill();
         for (int k = 0; k < 5; ++k) {
-            const unsigned ea = tab[A.acc & mask]; A.acc >>= ea >> 8; A.nb -= int(ea >> 8); la[i + k] = uint8_t(ea);
-            const unsigned eb = tab[B.acc & mask]; B.acc >>= eb >> 8; B.nb -= int(eb >> 8); lb[i + k] = uint8_t(eb);
+            for (int j = 0; j < 4; ++j) {
+                const unsigned e = tab[S[j].acc & mask];
+                S[j].acc >>= e >> 8; S[j].nb -= int(e >> 8);
+                o[j][i + size_t(k)] = uint8_t(e);
+            }
         }
     }
-    for (; i < n1; ++i) {
-        A.refill();
-        const unsigned ea = tab[A.acc & mask]; A.acc >>= ea >> 8; A.nb -= int(ea >> 8); la[i] = uint8_t(ea);
-        if (i < n2) { B.refill(); const unsigned eb = tab[B.acc & mask]; B.acc >>= eb >> 8; B.nb -= int(eb >> 8); lb[i] = uint8_t(eb); }
+    for (int j = 0; j < 4; ++j) {
+        for (size_t t = i; t < cnt[j]; ++t) {
+            if (t == i || (S[j].nb < 10)) S[j].refill();
+            const unsigned e = tab[S[j].acc & mask];
+            S[j].acc >>= e >> 8; S[j].nb -= int(e >> 8);
+            o[j][t] = uint8_t(e);
+        }
+        if (!S[j].ok()) return false;
     }
-    if (!A.ok() || !B.ok()) return false;
+    // quarter k was written at lit + k*q and each ends where the next begins (or at nlit), so lit[] is contiguous
+    const uint8_t* const seq = ip + l0 + l1 + l2 + l3;
     std::memset(lit + nlit, 0, 32);
-    const uint8_t* seq = ip + lenA + lenB;
     return decode_impl<true, true>(seq, size_t(iend - seq), dst, outlen, lit, lit + nlit);
 }
 
@@ -626,6 +644,51 @@ inline void expand_period(uint8_t* op, const uint8_t* m, size_t offset, size_t m
 namespace {
 // V2 = page format: offset byte 0 = repeat the previous offset, 1..0xEF = that offset, 0xF0..0xFF + byte =
 // 240 + 12-bit value (covers every offset inside a page of up to 4336 bytes). Everything else matches LZ4.
+// Fully checked match copy for any offset / length / output slack. Requires 1 <= offset <= op - dst.
+static inline bool copy_match(uint8_t*& op, uint8_t* const oend, size_t offset, size_t mlen) {
+    if (mlen > size_t(oend - op)) return false;
+    const uint8_t* m = op - offset;
+    const size_t room = size_t(oend - op);
+    if (offset >= 16) {
+        if (offset < mlen && mlen >= 256) {
+            // Long overlapping match: expand by doubling (wide memcpy, disjoint ranges, no slack needed).
+            expand_period(op, m, offset, mlen);
+        } else if (room >= mlen + 16) {
+            uint8_t* d = op;
+            uint8_t* const e = op + mlen;
+            do { copy16(d, m); d += 16; m += 16; } while (d < e);
+        } else {
+            // Tight output: exact 16-byte chunks are safe for ANY offset >= 16 (each chunk's source lies
+            // entirely below its destination), so no output slack is needed. The < 16 byte remainder is
+            // disjoint too, because the remainder is shorter than the offset.
+            size_t i = 0;
+            for (; i + 16 <= mlen; i += 16) copy16(op + i, m + i);
+            if (i < mlen) std::memcpy(op + i, m + i, mlen - i);
+        }
+    } else if (offset == 1) {
+        std::memset(op, m[0], mlen);
+    } else if (mlen >= 1024 || (room < mlen + 16 && mlen >= 128)) {
+        // Long short-period matches benefit from logarithmic expansion even with slack available;
+        // medium matches use it when the output is tight.
+        expand_period(op, m, offset, mlen);
+    } else if (room >= mlen + 16) {
+        // short period: write 16 bytes by hand, then continue from a multiple of the period >= 16
+        size_t pre = mlen < 16 ? mlen : 16;
+        for (size_t i = 0; i < pre; ++i) op[i] = m[i];
+        if (mlen > 16) {
+            const size_t off2 = offset * ((16 + offset - 1) / offset);
+            uint8_t* d = op + 16;
+            const uint8_t* s = d - off2;
+            uint8_t* const e = op + mlen;
+            do { copy16(d, s); d += 16; s += 16; } while (d < e);
+        }
+    } else {
+        for (size_t i = 0; i < mlen; ++i) op[i] = m[i];
+    }
+    op += mlen;
+    return true;
+}
+
 // SEP: literals come from a separate, already decoded buffer [lp, lend) that is padded by >= 16 readable
 // bytes, instead of from the token stream (used by the Huffman-literal page format).
 template <bool V2, bool SEP>
@@ -643,7 +706,7 @@ bool decode_impl(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen, c
         // with 32 spare input bytes and 64 spare output bytes every copy below is a fixed-size wide copy that
         // cannot leave either buffer, so none of the per-byte bounds checks are needed. Anything else (long
         // lengths, buffer ends, offsets < 8) takes the fully checked path that follows.
-        if (lit < 15 && (token & 15) < 15 && iend - ip >= 32 && oend - op >= 64) {
+        if (lit < 15 && iend - ip >= 32 && oend - op >= 64) {
             if (SEP) {
                 if (lit > size_t(lend - lp)) return false;
                 copy16(op, lp);
@@ -668,18 +731,38 @@ bool decode_impl(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen, c
                 ip += 2;
             }
             if (offset == 0 || offset > size_t(op - dst)) return false;
-            const size_t mlen = (token & 15) + MIN_MATCH;      // 4..18
+            size_t mlen = (token & 15) + MIN_MATCH;            // 4..18, or longer after the extension below
             const uint8_t* m = op - offset;
+            if ((token & 15) == 15) {
+                unsigned x;
+                do {
+                    if (ip >= iend) return false;
+                    x = *ip++;
+                    mlen += x;
+                    if (mlen > outlen) return false;
+                } while (x == 255);
+                if (offset >= 16 && size_t(oend - op) >= mlen + 16) {
+                    uint8_t* d = op;
+                    uint8_t* const e = op + mlen;
+                    do { copy16(d, m); d += 16; m += 16; } while (d < e);
+                    op = e;
+                } else if (!copy_match(op, oend, offset, mlen)) {
+                    return false;
+                }
+                continue;
+            }
+            // mlen <= 18 and 64 bytes of output slack: copy a fixed 32 (24) bytes without testing the length;
+            // whatever lands beyond op + mlen is overwritten by the next sequence
             if (offset >= 16) {
                 copy16(op, m);
-                if (mlen > 16) copy16(op + 16, m + 16);
+                copy16(op + 16, m + 16);
                 op += mlen;
                 continue;
             }
             if (offset >= 8) {
                 copy8(op, m);
                 copy8(op + 8, m + 8);
-                if (mlen > 16) copy8(op + 16, m + 16);
+                copy8(op + 16, m + 16);
                 op += mlen;
                 continue;
             }
@@ -743,46 +826,7 @@ bool decode_impl(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen, c
             } while (s == 255);
         }
         mlen += MIN_MATCH;
-        if (mlen > size_t(oend - op)) return false;
-        const uint8_t* m = op - offset;
-        const size_t room = size_t(oend - op);
-        if (offset >= 16) {
-            if (offset < mlen && mlen >= 256) {
-                // Long overlapping match: expand by doubling (wide memcpy, disjoint ranges, no slack needed).
-                expand_period(op, m, offset, mlen);
-            } else if (room >= mlen + 16) {
-                uint8_t* d = op;
-                uint8_t* const e = op + mlen;
-                do { copy16(d, m); d += 16; m += 16; } while (d < e);
-            } else {
-                // Tight output: exact 16-byte chunks are safe for ANY offset >= 16 (each chunk's source lies
-                // entirely below its destination), so no output slack is needed. The < 16 byte remainder is
-                // disjoint too, because the remainder is shorter than the offset.
-                size_t i = 0;
-                for (; i + 16 <= mlen; i += 16) copy16(op + i, m + i);
-                if (i < mlen) std::memcpy(op + i, m + i, mlen - i);
-            }
-        } else if (offset == 1) {
-            std::memset(op, m[0], mlen);
-        } else if (mlen >= 1024 || (room < mlen + 16 && mlen >= 128)) {
-            // Long short-period matches benefit from logarithmic expansion even with slack available;
-            // medium matches use it when the output is tight.
-            expand_period(op, m, offset, mlen);
-        } else if (room >= mlen + 16) {
-            // short period: write 16 bytes by hand, then continue from a multiple of the period >= 16
-            size_t pre = mlen < 16 ? mlen : 16;
-            for (size_t i = 0; i < pre; ++i) op[i] = m[i];
-            if (mlen > 16) {
-                const size_t off2 = offset * ((16 + offset - 1) / offset);
-                uint8_t* d = op + 16;
-                const uint8_t* s = d - off2;
-                uint8_t* const e = op + mlen;
-                do { copy16(d, s); d += 16; s += 16; } while (d < e);
-            }
-        } else {
-            for (size_t i = 0; i < mlen; ++i) op[i] = m[i];
-        }
-        op += mlen;
+        if (!copy_match(op, oend, offset, mlen)) return false;
     }
 }
 }  // namespace

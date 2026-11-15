@@ -12,6 +12,7 @@
 #include <fstream>
 #include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../src/fast.hpp"
@@ -27,7 +28,21 @@
 #include <zlib.h>
 #endif
 
+#include <atomic>
 using Clock = std::chrono::steady_clock;
+#ifdef HAVE_ZSTD
+struct ZCtx { ZSTD_CCtx* c = ZSTD_createCCtx(); ZSTD_DCtx* d = ZSTD_createDCtx(); };
+static ZCtx& zctx_get() { static thread_local ZCtx z; return z; }   // one context pair per thread, made on first use
+#endif
+
+// runs fn(begin, end) over [0, n) split into `threads` contiguous slices; threads == 1 runs inline
+template <class F>
+static void run_threads(unsigned threads, size_t n, F fn) {
+    if (threads <= 1) { fn(0, n); return; }
+    std::vector<std::thread> th;
+    for (unsigned k = 0; k < threads; ++k) th.emplace_back([&, k] { fn(n * k / threads, n * (k + 1) / threads); });
+    for (auto& t : th) t.join();
+}
 static double secs(Clock::time_point t) { return std::chrono::duration<double>(Clock::now() - t).count(); }
 
 struct Codec {
@@ -50,14 +65,16 @@ static bool same_filled(const uint8_t* p, size_t n) {
 int main(int argc, char** argv) {
     size_t page = 4096;
     int reps = 5;
+    unsigned threads = 1;
     std::vector<std::string> files;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "-p" && i + 1 < argc) page = std::strtoull(argv[++i], nullptr, 10);
         else if (a == "-r" && i + 1 < argc) reps = std::atoi(argv[++i]);
+        else if (a == "-t" && i + 1 < argc) threads = unsigned(std::atoi(argv[++i]));
         else files.push_back(a);
     }
-    if (files.empty()) { std::fprintf(stderr, "usage: bench_pages [-p PAGE] [-r REPS] FILE...\n"); return 64; }
+    if (files.empty()) { std::fprintf(stderr, "usage: bench_pages [-p PAGE] [-r REPS] [-t THREADS] FILE...\n"); return 64; }
 
     std::vector<Codec> codecs;
     using namespace amdc1::fast;
@@ -84,12 +101,10 @@ int main(int argc, char** argv) {
 #endif
 #ifdef HAVE_ZSTD
     // contexts are reused across pages, exactly as zswap/zram do; allocating one per page would understate zstd badly
-    static ZSTD_CCtx* cctx = ZSTD_createCCtx();
-    static ZSTD_DCtx* dctx = ZSTD_createDCtx();
     for (int lv : {-3, 1, 3}) {
         codecs.push_back({"zstd" + std::to_string(lv),
-            [lv](const uint8_t* s, size_t n, uint8_t* d, size_t cap) { size_t r = ZSTD_compressCCtx(cctx, d, cap, s, n, lv); return ZSTD_isError(r) ? 0 : r; },
-            [](const uint8_t* s, size_t n, uint8_t* d, size_t on) { size_t r = ZSTD_decompressDCtx(dctx, d, on, s, n); return !ZSTD_isError(r) && r == on; }});
+            [lv](const uint8_t* s, size_t n, uint8_t* d, size_t cap) { size_t r = ZSTD_compressCCtx(zctx_get().c, d, cap, s, n, lv); return ZSTD_isError(r) ? 0 : r; },
+            [](const uint8_t* s, size_t n, uint8_t* d, size_t on) { size_t r = ZSTD_decompressDCtx(zctx_get().d, d, on, s, n); return !ZSTD_isError(r) && r == on; }});
     }
 #endif
 #ifdef HAVE_ZLIB
@@ -100,7 +115,7 @@ int main(int argc, char** argv) {
         [](const uint8_t* s, size_t n, uint8_t* d, size_t on) { uLongf o = uLongf(on); return uncompress(d, &o, s, uLong(n)) == Z_OK && o == on; }});
 #endif
 
-    std::printf("%-14s %-9s %8s %10s %10s\n", "file", "codec", "size%", "comp MB/s", "decomp MB/s");
+    std::printf("threads: %u\n%-14s %-9s %8s %10s %10s\n", threads, "file", "codec", "size%", "comp MB/s", "decomp MB/s");
     std::vector<double> tot_c(codecs.size(), 0), tot_ct(codecs.size(), 0), tot_dt(codecs.size(), 0);
     double tot_raw = 0;
     for (const auto& f : files) {
@@ -123,18 +138,25 @@ int main(int argc, char** argv) {
             double best_c = 1e30, best_d = 1e30;
             for (int r = 0; r < reps; ++r) {
                 auto t = Clock::now();
-                for (size_t i = 0; i < np; ++i)
-                    clen[i] = same[i] ? 0 : c.enc(&mem[i * page], page, &store[i * cap], cap);
+                run_threads(threads, np, [&](size_t b, size_t e) {
+                    for (size_t i = b; i < e; ++i)
+                        clen[i] = same[i] ? 0 : c.enc(&mem[i * page], page, &store[i * cap], cap);
+                });
                 best_c = std::min(best_c, secs(t));
             }
             double comp = 0;
             for (size_t i = 0; i < np; ++i) comp += same[i] ? 8 : (clen[i] && clen[i] < page ? double(clen[i]) : double(page));
             for (int r = 0; r < reps; ++r) {
+                std::atomic<bool> bad{false};
                 auto t = Clock::now();
-                for (size_t i = 0; i < np; ++i) {
-                    if (same[i] || !clen[i] || clen[i] >= page) continue;
-                    if (!c.dec(&store[i * cap], clen[i], out.data(), page)) { std::fprintf(stderr, "DECODE FAIL %s\n", c.name.c_str()); return 2; }
-                }
+                run_threads(threads, np, [&](size_t b, size_t e) {
+                    std::vector<uint8_t> o(page);
+                    for (size_t i = b; i < e; ++i) {
+                        if (same[i] || !clen[i] || clen[i] >= page) continue;
+                        if (!c.dec(&store[i * cap], clen[i], o.data(), page)) bad = true;
+                    }
+                });
+                if (bad) { std::fprintf(stderr, "DECODE FAIL %s\n", c.name.c_str()); return 2; }
                 best_d = std::min(best_d, secs(t));
             }
             for (size_t i = 0; i < np; ++i) {   // verify outside the timed region

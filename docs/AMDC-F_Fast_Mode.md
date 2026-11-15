@@ -105,32 +105,36 @@ The shared VM varies by about +-30% between runs, so compare rows within one run
 
 | codec | size | compress MB/s | decompress MB/s |
 |---|---|---|---|
-| amdcf level 1 (LZ4 format) | 41.5% | 693 | 3164 |
-| amdcf level 2 (LZ4 format) | 37.5% | 131 | 3735 |
-| **amdcf level 3** | 37.2% | 659 | 2425 |
-| **amdcf level 4** | 34.4% | 136 | 2657 |
-| **amdcf level 5** | 33.4% | 250 | 1113 |
-| **amdcf level 6** | 30.9% | 102 | 1210 |
-| lz4 (fast 1) | 41.3% | 899 | 4177 |
+| amdcf level 1 (LZ4 format) | 41.5% | 716 | 3374 |
+| amdcf level 2 (LZ4 format) | 37.5% | 132 | 4152 |
+| **amdcf level 3** | 37.2% | 669 | 2360 |
+| **amdcf level 4** | 34.4% | 139 | 2815 |
+| **amdcf level 5** | 33.4% | 257 | 1230 |
+| **amdcf level 6** | 30.9% | 104 | 1389 |
+| lz4 (fast 1) | 41.3% | 928 | 4409 |
 | lz4hc-3 | 37.7% | 204 | 4711 |
 | zstd -3 | 39.1% | 594 | 1842 |
-| zstd 1 | 27.7% | 383 | 925 |
+| zstd 1 | 27.7% | 388 | 958 |
 | zstd 3 | 27.3% | 345 | 956 |
-| zlib 1 (stand-in for Windows' Xpress-Huffman, see below) | 29.0% | 129 | 432 |
+| zlib 1 (stand-in for Windows' Xpress-Huffman, see below) | 29.0% | 130 | 442 |
 
 Honest reading:
 
 * Against **LZ4-class RAM compressors** (what zram uses by default): levels 3/4 are 4-7 points smaller than LZ4 at similar
-  compress speed, but **LZ4's decoder is still faster** (about 1.3-1.7x). Level 1/2 decode speed is the same class as LZ4's but
+  compress speed, but **LZ4's decoder is still faster** (about 1.3x faster than level 1, 1.6-1.9x faster than levels 3/4). Level 1/2 decode speed is the same class as LZ4's but
   slightly below it.
-* Against **zstd**: levels 5/6 decode about 1.2-1.3x faster than zstd 1 but are **about 3 points larger**. zstd still wins on size.
+* Against **zstd**: levels 5/6 decode about 1.3-1.45x faster than zstd 1 but are **about 3 points larger**. zstd still wins on size.
 * Against **Windows' compressor (Xpress-Huffman)**: it is not available outside Windows, so it was **not measured**. zlib-1 is
   the same family (LZ77 + Huffman) and a similar size class, so it is used as a rough proxy only. Level 6 is about 2 points
-  larger than zlib-1 but decodes about 2.8x faster; level 5 decodes about 2.6x faster. Do not read this as a measured
+  larger than zlib-1 but decodes about 3.1x faster; level 5 decodes about 2.8x faster. Do not read this as a measured
   win over Windows; run it on the target machine.
 * **lzo-rle**, zram's other common default, was not built or measured here.
 * On the three page-cache runs in `amdcf ramsim` (Python objects, text, mixed heap; 288 MiB): RAM saved 66.7% at level 1,
   71.5% at level 3, 73.9% at level 5, 76.8% at level 6.
+
+Multi-core: pages are independent, so decode scales with cores (`bench_pages -t N`). On a 2-core VM, 2 threads gave
+about 1.9x: level 1 6.4 GB/s, level 3 4.7 GB/s, levels 5/6 2.4-2.7 GB/s aggregate decode, against LZ4 8.3 GB/s and
+zstd 1 1.8 GB/s at the same thread count. Only 2 threads were measured; larger counts are not claimed.
 
 Reproduce: `LZ4=/path/to/lz4/lib ZSTD=/path/to/zstd/lib bench/bench_pages.sh FILE...` (lz4/zstd optional).
 
