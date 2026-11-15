@@ -415,8 +415,25 @@ static Bytes structured(size_t n, int stride) {      // like an array of small r
     return b;
 }
 
+static Bytes read_file(const char* path) {
+    Bytes b;
+    if (FILE* f = std::fopen(path, "rb")) {
+        uint8_t buf[65536];
+        size_t r;
+        while ((r = std::fread(buf, 1, sizeof buf, f)) > 0) b.insert(b.end(), buf, buf + r);
+        std::fclose(f);
+    }
+    return b;
+}
+
 static std::vector<Bytes> page_samples(size_t n) {
     std::vector<Bytes> v;
+    if (n == 4096) {                                     // real text and real machine code, so the built-in tables get used
+        static const Bytes files[2] = {read_file("src/fast.cpp"), read_file("build/test_fast")};
+        for (const Bytes& f : files)
+            for (size_t k = 0; k < 6 && (k + 1) * 4096 * 3 <= f.size(); ++k)
+                v.emplace_back(f.begin() + long(k * 4096 * 3), f.begin() + long(k * 4096 * 3 + 4096));
+    }
     v.push_back(texty(n)); v.push_back(rnd(n, 3)); v.push_back(rnd(n, 16)); v.push_back(rnd(n, 64)); v.push_back(rnd(n));
     v.push_back(periodic(n, 7)); v.push_back(periodic(n, 100)); v.push_back(periodic(n, 700));
     v.push_back(structured(n, 8)); v.push_back(structured(n, 24)); v.push_back(structured(n, 64));
@@ -451,7 +468,7 @@ static std::vector<Bytes> page_samples(size_t n) {
 }
 
 static void test_page3() {
-    size_t huf_used = 0, lz2_used = 0, seqc_used = 0, litc_used = 0, split3_used = 0, xf_used[4] = {0, 0, 0, 0};
+    size_t huf_used = 0, lz2_used = 0, huf4_used = 0, litc_used = 0, split_used[4] = {0, 0, 0, 0}, preset_used = 0, xf_used[4] = {0, 0, 0, 0};
     for (size_t n : {size_t(1), size_t(15), size_t(16), size_t(17), size_t(100), size_t(511), size_t(1000), size_t(4095), size_t(4096), size_t(4336)}) {
         for (const Bytes& pg : page_samples(n)) {
             Bytes enc(page3_bound(n)), out(n);
@@ -460,11 +477,19 @@ static void test_page3() {
                 if (!c) continue;
                 CHECK(c < n);
                 if (enc[0] == PAGE_XFORM) { CHECK(enc[1] >= 1 && enc[1] <= 3); ++xf_used[enc[1]]; }
-                if (enc[0] == PAGE_HUF) { ++huf_used; litc_used += (enc[1] & 1) != 0; }
-                if (enc[0] == PAGE_SPLIT) { ++seqc_used; int nb = 0; for (int q = 0; q < 4; ++q) nb += (enc[1] >> q) & 1; if (nb >= 3) ++split3_used; }
+                if (enc[0] == PAGE_HUF) { ++huf_used; litc_used += (enc[1] & 1) != 0; preset_used += (enc[1] & 4) != 0; }
+                if (enc[0] == PAGE_HUF4) {
+                    ++huf4_used;
+                    for (int b = 0; b < 4; ++b) split_used[b] += ((enc[1] >> (2 * b)) & 3) != 0;
+                    for (int b = 0; b < 4; ++b) preset_used += ((enc[1] >> (2 * b)) & 3) == 2;
+                }
                 if (enc[0] == PAGE_LZ2) ++lz2_used;
                 std::fill(out.begin(), out.end(), 0x55);
                 CHECK(page3_decompress(enc.data(), c, out.data(), n) && out == pg);
+                if (enc[0] == PAGE_HUF4) {                       // the direct three-stream decoder against the re-interleaving one
+                    Bytes o2(n, 0x33);
+                    CHECK(page4_decompress_reference(enc.data(), c, o2.data(), n) && o2 == pg);
+                }
                 Bytes sink(n + 1);
                 CHECK(!page3_decompress(enc.data(), c, sink.data(), n + 1) || enc[0] == PAGE_FILL || enc[0] == PAGE_ZERO);
                 if (n > 1) CHECK(!page3_decompress(enc.data(), c, sink.data(), n - 1) || enc[0] == PAGE_FILL || enc[0] == PAGE_ZERO);
@@ -482,10 +507,13 @@ static void test_page3() {
             }
         }
     }
-    CHECK(huf_used > 20 && lz2_used > 20 && seqc_used > 10 && litc_used > 20 && split3_used > 5);   // every blob variant is really exercised
+    CHECK(huf_used > 20 && lz2_used > 20 && huf4_used > 10 && litc_used > 20);   // every blob variant is really exercised
+    CHECK(split_used[0] > 5 && split_used[1] > 5 && split_used[2] > 5);          // literal, token and offset blocks are coded
+    CHECK(preset_used > 5);                                                      // built-in tables are used and round-trip
+    std::printf("page3 kinds exercised: huf %zu (lit-coded %zu), huf4 %zu (coded blocks lit/tok/off/ext %zu/%zu/%zu/%zu), preset blocks %zu, lz2 %zu\n",
+                huf_used, litc_used, huf4_used, split_used[0], split_used[1], split_used[2], split_used[3], preset_used, lz2_used);
     CHECK(xf_used[1] > 0 && xf_used[2] > 0 && xf_used[3] > 0);        // all three transforms are really exercised
     std::printf("page3 transforms: shuf8 %zu, shuf4 %zu, delta4+shuf4 %zu\n", xf_used[1], xf_used[2], xf_used[3]);
-    std::printf("page3 kinds exercised: huf %zu (lit-coded %zu), split %zu (3+ parts coded %zu), lz2 %zu\n", huf_used, litc_used, seqc_used, split3_used, lz2_used);
 }
 
 static void test_page3_mutation() {
@@ -510,6 +538,13 @@ static void test_page3_mutation() {
                     const bool ok = page3_decompress(m.data(), m.size(), out.data(), n);
                     ++total; decoded_ok += ok;
                     for (size_t i = n; i < out.size(); ++i) if (out[i] != 0xCC) { CHECK(false); break; }
+                    if (m[0] == PAGE_HUF4) {                 // must be accepted or rejected exactly like the reference decoder
+                        Bytes o2(n + 64, 0xCC);
+                        const bool rok = page4_decompress_reference(m.data(), m.size(), o2.data(), n);
+                        CHECK(rok == ok);
+                        if (rok && ok) CHECK(Bytes(o2.begin(), o2.begin() + long(n)) == Bytes(out.begin(), out.begin() + long(n)));
+                        for (size_t i = n; i < o2.size(); ++i) if (o2[i] != 0xCC) { CHECK(false); break; }
+                    }
                     if (m[0] == PAGE_LZ2 && n >= 16) {
                         Bytes ref;
                         const bool rok = ref_page2(m.data() + 1, m.size() - 1, ref, n);

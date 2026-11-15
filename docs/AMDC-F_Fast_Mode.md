@@ -96,14 +96,12 @@ The LZ4 block format spends two bytes on every offset and cannot entropy-code an
 | 4 | level 3 with a chained, cost-aware parse |
 | 5 | level 3 + Huffman-coded literals (canonical code, max length 10, four interleaved bit streams), only when smaller |
 | 6 | level 4 + Huffman-coded literals |
-| 7 | level 4, with the page split into four streams (literals, tokens, offsets, length extensions) that each get their own Huffman code when that is smaller |
+| 7 | level 4 + Huffman-coded literals **and** sequence bytes, split into token / offset / length-extension alphabets (kind `PAGE_HUF4`), built-in code tables, see below |
 | 8 | level 7 + a per-page **word transform**: the page's 4- or 8-byte words are split into byte planes (optionally after a 32-bit delta) when a cheap trial shows a clear win; the result goes through the level-7 codec |
 
 Each Huffman block is used only when it makes that part smaller, so a page never grows because of it. The sequence bytes
-(tokens, offsets, lengths) are a large share of a compressed page (33-38% on the compressible heap data here, 6-9% on
-text and binaries), which is why level 7 gains about 2.4 points over level 6. Splitting them into one stream per kind
-(rather than one shared code) was worth only a further 0.24 points for about 10% of decode speed: each extra stream pays
-for its own code table, which is a lot on pages that compress to a few hundred bytes.
+are a large share of a compressed page (33-38% on the compressible heap data here, 6-9% on text and binaries), which is
+why level 7 gains about 2 points over level 6.
 
 Per-page results, 4 KiB pages compressed independently, single core, every page decoded and compared. Corpus: 383 MB of
 heap images generated here (Python object graphs, text, numeric arrays, a mixed heap with zero and random pages) plus
@@ -119,8 +117,8 @@ The shared VM varies by about +-30% between runs, so compare rows within one run
 | **amdcf level 4** | 34.4% | 137 | 2858 |
 | **amdcf level 5** | 33.5% | 255 | 1256 |
 | **amdcf level 6** | 31.0% | 103 | 1378 |
-| **amdcf level 7** | 28.6% | 71 | 871 |
-| **amdcf level 8** (word transform) | **26.1%** | 60 | 991 |
+| **amdcf level 7** | 27.7% | 83 | 969 |
+| **amdcf level 8** (word transform) | **25.2%** | 70 | 1119 |
 | lz4 (fast 1) | 41.3% | 900 | 4323 |
 | lz4hc-3 | 37.7% | 208 | 5067 |
 | zstd 1 | 27.7% | 387 | 940 |
@@ -131,27 +129,65 @@ Honest reading:
 
 * Against **LZ4-class RAM compressors** (what zram uses by default): levels 3/4 are 4-7 points smaller than LZ4 at similar
   compress speed, but **LZ4's decoder is still faster** (about 1.3x faster than level 1, 1.5-1.8x faster than levels 3/4).
-* Against **zstd**: level 7 is **about 0.9 points larger and about 7% slower to decode** than zstd 1, and it compresses
-  about 5x slower, so zstd 1 is the better codec at that size. Per file, level 7 is within 0.3-0.5 points of zstd 1 on
-  the mixed heap and text, 0.9-1.0 on Python objects and binaries, and 2.3 behind on numeric arrays. Levels 5/6 decode about 1.3-1.45x faster than zstd 1 but are 6 and 3 points larger. zstd still wins on size.
+* Against **zstd**: level 7 decodes about 6% faster than zstd 1 and is the same size (27.7% vs 27.7% on this corpus); level 8 is 2.5 points smaller and decodes about 23% faster. Both compress
+  about 4-5x slower than zstd 1. Levels 5/6 decode about 1.3-1.45x faster than zstd 1 but are 6 and 3 points larger than zstd 1; levels 7 and 8 close that gap.
 * Against **Windows' compressor (Xpress-Huffman)**: it is not available outside Windows, so it was **not measured**. zlib-1 is
-  the same family (LZ77 + Huffman) and a similar size class, so it is used as a rough proxy only. Level 7 is slightly
-  smaller than zlib-1 and decodes about 2x faster; level 6 is 2 points larger and decodes 3.1x faster. Do not read
+  the same family (LZ77 + Huffman) and a similar size class, so it is used as a rough proxy only. Level 7 is about
+  the same size as zlib-1 and decodes about 2.2x faster; level 6 is 2 points larger and decodes 3.1x faster. Do not read
   this as a measured win over Windows; run it on the target machine.
 * **lzo-rle**, zram's other common default, was not built or measured here.
-* Compression of the higher levels is slow (level 7 about 90 MB/s): they suit pages that are written rarely and read often.
+* Compression of the higher levels is slow (levels 7 and 8 about 70-80 MB/s): they suit pages that are written rarely and read often.
 * On the three page-cache runs in `amdcf ramsim` (Python objects, text, mixed heap; 288 MiB) the earlier levels saved
   66.7% (level 1), 71.5% (3), 73.9% (5) and 76.8% (6) of RAM.
 
 Multi-core: pages are independent, so both compression and decompression scale with cores (`bench_pages -t N`), as they
 do for LZ4 and zstd when those are used per page. On a 2-core VM, 2 threads gave about 1.8-1.9x. Decode in GB/s at 2
-threads: level 1 5.9, level 3 4.5, level 5 2.3, level 6 2.6, level 7 1.6, against LZ4 8.1 and zstd 1 1.8. Only 2 threads
+threads: level 1 5.7, level 3 4.5, level 5 2.4, level 6 2.6, level 7 1.8, against LZ4 8.3 and zstd 1 1.7. Only 2 threads
 were measured; larger counts are not claimed.
 
 Reproduce: `LZ4=/path/to/lz4/lib ZSTD=/path/to/zstd/lib bench/bench_pages.sh [-t THREADS] FILE...` (lz4/zstd optional).
 
-Tests: round trips over 12 page shapes x 10 sizes x 5 page levels, a naive reference decoder compared against the fast decoder,
+Tests: round trips over 12 page shapes x 10 sizes x 5 levels, a naive reference decoder compared against the fast decoder,
 73,000 randomly corrupted blobs checked for guard-byte integrity, all under ASan + UBSan in `make sanitize`.
+
+
+## Level 7 v2: split alphabets and built-in code tables
+
+Two changes took level 7 from "about the size of zstd 1" to smaller than zstd 1 on three of four held-out data sets.
+
+1. **Split alphabets.** Token bytes, offset bytes and length-extension bytes have very different distributions; coding them
+   with one shared Huffman code wasted about 7% of a page (order-0 entropy of the split vs the mixed stream, measured on
+   both held-out RAM dumps). Level 7 now codes literals, tokens, offsets and extension bytes as four separate blocks
+   (kind `PAGE_HUF4`). The decoder reads the three sequence streams directly (`decode_split`), no re-interleaving pass.
+2. **Built-in code tables.** On 4 KiB pages the Huffman code-length headers were about 21% of the compressed output
+   (about 96 bytes for literals plus 61 for sequence bytes, of 754 bytes per page). A block can now name one of a few
+   built-in codes in 4 bits instead of carrying its own header, and decode tables for them are built once. The encoder
+   still picks the cheapest of raw / own code / built-in code per block, so a page never gets bigger. The tables live in
+   `src/presets.hpp` and are generated by `tools/train_presets.cpp`.
+
+Retrain the tables on memory that looks like yours (use data that is not your test data):
+
+```
+g++ -std=c++17 -O2 -DAMDC_TRAIN -Isrc tools/train_presets.cpp -o build/train_presets
+build/train_presets 8 4 4 1 src/presets.hpp -s 2 dump1.bin dump2.bin ...    # literal, token, offset, extension table counts
+```
+
+Held-out results (4 KiB pages, single core, same run, shared VM so about +-30% on speed). The tables were trained on a
+different Python-object heap, a different compiler process, other shared libraries and other source files, none of which
+are in this table. `heap` = writable memory of a Python process holding dicts/lists/strings (83 MB), `cc1` = memory of
+a g++ compiler process mid-compile (146 MB), `bin` = a Python interpreter plus libstdc++ (6 MB), `py` = Python source (6 MB).
+
+| data | level 7 before | level 7 now | zstd 1 | LZ4 | level 7 decode now | zstd 1 decode |
+|---|---|---|---|---|---|---|
+| heap | 17.86% | **17.08%** | 16.50% | 30.83% | 1028 MB/s | 955 MB/s |
+| cc1 | n/m | **14.76%** | 16.38% | 25.69% | 908 MB/s | 834 MB/s |
+| bin | n/m | **48.58%** | 49.41% | 62.77% | 506 MB/s | 569 MB/s |
+| py | n/m | **34.28%** | 35.89% | 50.02% | 513 MB/s | 637 MB/s |
+
+Honest reading: level 7 is now smaller than zstd 1 on cc1, bin and py (by 0.8-1.6 points) and still 0.6 points larger on
+the Python heap. It decodes faster than zstd 1 on the two RAM dumps and 10-20% slower on bin and py. Compression is
+about 4-5x slower than zstd 1 (70 vs 340 MB/s). LZ4 still decodes about 3x faster, at about twice the size.
+The tables are tuned on this machine's kind of data: measure on yours, and retrain if the gain is small there.
 
 ## What this does NOT do: "optimizing Windows by compressing its RAM"
 
@@ -185,12 +221,12 @@ Page kind `PAGE_XFORM`: `[7][transform id][inner page blob]`; the decoder decode
 
 | file | level 7 | level 8 | zstd 1 |
 |---|---|---|---|
-| numeric.mem | 64.3% | 51.5% | 62.0% |
-| mixed.mem | 16.2% | 14.0% | 15.9% |
-| all six files | 28.6% | 26.1% | 27.7% |
+| numeric.mem | 63.9% | 51.2% | 62.0% |
+| mixed.mem | 16.1% | 13.7% | 15.9% |
+| all six files | 27.7% | 25.2% | 27.7% |
 
-Level 8 decodes at about 990 MB/s on the whole corpus (zstd 1: 912) and is smaller than zstd 1 there.
+Level 8 decodes at about 1,120 MB/s on the whole corpus (zstd 1: 911) and is smaller than zstd 1 there.
 Honest reading: the gain comes from word-structured pages (numeric 13 points, mixed 2); text-like pages are unchanged
 because the identity transform wins. The corpus is synthetic, so the size of the gain on real memory is unmeasured.
-Compression is about 60 MB/s: a cheap run-count screen picks one candidate transform and only that one gets a full pass (an earlier version trialled all three: 2.4 points smaller on numeric, 23 MB/s), so level 8 suits pages that are
+Compression is about 70 MB/s: a cheap run-count screen picks one candidate transform and only that one gets a full pass (an earlier version trialled all three: 2.4 points smaller on numeric, 23 MB/s), so level 8 suits pages that are
 written rarely and read often. Tests cover round trips, all three transforms, corruption fuzzing and ASan/UBSan.

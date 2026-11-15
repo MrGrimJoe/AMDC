@@ -38,16 +38,17 @@ bool page2_decompress(const uint8_t* src, size_t n, uint8_t* dst, size_t out_len
 inline size_t page3_bound(size_t n) { return block_bound(n) + 16; }
 size_t page3_compress(const uint8_t* page, size_t n, uint8_t* out, int level = 1);
 bool page3_decompress(const uint8_t* enc, size_t len, uint8_t* page, size_t n);
+// Test hook: decodes a PAGE_HUF4 blob through a slower, independent path (sequence streams re-interleaved first).
+bool page4_decompress_reference(const uint8_t* enc, size_t len, uint8_t* page, size_t n);
 
 // ---- page codec (RAM compression building block) --------------------------------------------------
-enum PageKind : uint8_t { PAGE_RAW = 0, PAGE_ZERO = 1, PAGE_FILL = 2, PAGE_LZ = 3, PAGE_LZ2 = 4, PAGE_HUF = 5, PAGE_SPLIT = 6, PAGE_XFORM = 7 };
+enum PageKind : uint8_t { PAGE_RAW = 0, PAGE_ZERO = 1, PAGE_FILL = 2, PAGE_LZ = 3, PAGE_LZ2 = 4, PAGE_HUF = 5, PAGE_HUF4 = 6, PAGE_XFORM = 7 };
 
 inline size_t page_encode_bound(size_t page) { return block_bound(page) + 17; }
 
 // Levels: 1 and 2 write LZ4-format blobs (kind PAGE_LZ). Levels 3-7 (pages up to kPage2Max bytes; larger pages fall
 // back to levels 1/2) write the page v2/v3 formats: 3 = fast parse, 4 = chained parse, 5 = fast parse + Huffman
-// literals, 6 = chained parse + Huffman literals, 7 = chained parse, and the page is also split into separate literal,
-// token, offset and length streams that each get their own Huffman code (whichever of 6 and 7 is smaller is kept).
+// literals, 6 = chained parse + Huffman literals, 7 = chained parse + Huffman literals AND Huffman sequence bytes (split token/offset/extension alphabets, built-in tables).
 // 8 = level 7 plus a per-page word transform (4/8-byte byte-plane shuffle, optionally after a 32-bit delta) when that
 // shrinks the page; helps pointer/counter/float-heavy pages, costs one extra compression pass.
 // Level 5 is the best speed/size balance; level 7 is smallest (slowest to compress, ~30% slower to decode than 6).
