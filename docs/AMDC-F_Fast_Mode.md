@@ -84,7 +84,7 @@ Little-endian targets only, which covers every Windows target (x64 and ARM64).
 because `memcpy`-based expansion of a long repeat is the decoder's best case. **This is not real-data throughput**; for that, use the
 table above (about 2-4 GB/s per core on typical data). Quote the two separately.
 
-## Page levels 3-7: a RAM-page format that is smaller than LZ4 (new)
+## Page levels 3-8: a RAM-page format that is smaller than LZ4 (new)
 
 The LZ4 block format spends two bytes on every offset and cannot entropy-code anything, which caps it near 41% on
 4 KiB memory pages. For pages (up to kPage2Max = 4336 bytes) there are five more levels in `page_compress` /
@@ -97,6 +97,7 @@ The LZ4 block format spends two bytes on every offset and cannot entropy-code an
 | 5 | level 3 + Huffman-coded literals (canonical code, max length 10, four interleaved bit streams), only when smaller |
 | 6 | level 4 + Huffman-coded literals |
 | 7 | level 4, with the page split into four streams (literals, tokens, offsets, length extensions) that each get their own Huffman code when that is smaller |
+| 8 | level 7 + a per-page **word transform**: the page's 4- or 8-byte words are split into byte planes (optionally after a 32-bit delta) when a cheap trial shows a clear win; the result goes through the level-7 codec |
 
 Each Huffman block is used only when it makes that part smaller, so a page never grows because of it. The sequence bytes
 (tokens, offsets, lengths) are a large share of a compressed page (33-38% on the compressible heap data here, 6-9% on
@@ -119,6 +120,7 @@ The shared VM varies by about +-30% between runs, so compare rows within one run
 | **amdcf level 5** | 33.5% | 255 | 1256 |
 | **amdcf level 6** | 31.0% | 103 | 1378 |
 | **amdcf level 7** | 28.6% | 71 | 871 |
+| **amdcf level 8** (word transform) | **25.7%** | 23 | 1040 |
 | lz4 (fast 1) | 41.3% | 900 | 4323 |
 | lz4hc-3 | 37.7% | 208 | 5067 |
 | zstd 1 | 27.7% | 387 | 940 |
@@ -173,3 +175,22 @@ block: 0 | raw bytes (block_len)      1 | varint clen | LZ4 block      2 | fill 
 ```
 Varints are unsigned LEB128. Block lengths are implied (`block_size`, last block shorter). `hash64` is a 4-lane multiply/xorshift
 hash of the original data (error detection, not cryptographic).
+
+### Level 8: word transforms (measured on the synthetic corpus below, not on real memory)
+
+Byte-oriented LZ and zstd cannot see that RAM is mostly 4/8-byte words (pointers, counters, indices, floats) whose
+high bytes repeat while the low bytes change. Level 8 gathers byte k of every word into one plane (the same idea as
+Blosc's shuffle, applied per 4 KiB page) and picks per page among shuffle-8, shuffle-4 and delta-32 + shuffle-4, or none.
+Page kind `PAGE_XFORM`: `[7][transform id][inner page blob]`; the decoder decodes the inner blob and inverts the transform.
+
+| file | level 7 | level 8 | zstd 1 |
+|---|---|---|---|
+| numeric.mem | 64.3% | 49.1% | 62.0% |
+| mixed.mem | 16.2% | 13.7% | 15.9% |
+| all five files | 28.6% | 25.7% | 27.7% |
+
+Level 8 decodes at about 1,040 MB/s on the whole corpus (zstd 1: 924) and is smaller than zstd 1 and zstd 3 there.
+Honest reading: the gain comes from word-structured pages (numeric 15 points, mixed 2.5); text-like pages are unchanged
+because the identity transform wins. The corpus is synthetic, so the size of the gain on real memory is unmeasured.
+Compression is slow (about 23 MB/s: it trials three transforms before the full pass), so level 8 suits pages that are
+written rarely and read often. Tests cover round trips, all three transforms, corruption fuzzing and ASan/UBSan.

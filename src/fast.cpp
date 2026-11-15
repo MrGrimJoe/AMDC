@@ -696,7 +696,55 @@ static bool all_same_bytes(const uint8_t* p, size_t n) {
     return n > 0;
 }
 
-size_t page3_compress(const uint8_t* page, size_t n, uint8_t* out, int level) {
+// ---- word transforms (level 8): byte-plane shuffle of 4/8-byte words, optionally after a 4-byte delta ----------
+// RAM is full of pointers, counters, indices and floats whose high bytes repeat while the low bytes change; gathering
+// byte k of every word into one plane turns that into long runs the LZ stage can see. Tail bytes (n % width) stay as is.
+enum : uint8_t { XF_SHUF8 = 1, XF_SHUF4 = 2, XF_DELTA4SHUF4 = 3, XF_COUNT = 4 };
+
+static void xf_shuffle(const uint8_t* s, uint8_t* d, size_t n, size_t w) {
+    const size_t nw = n / w;
+    for (size_t i = 0; i < nw; ++i)
+        for (size_t j = 0; j < w; ++j) d[j * nw + i] = s[i * w + j];
+    std::memcpy(d + nw * w, s + nw * w, n - nw * w);
+}
+static void xf_unshuffle(const uint8_t* s, uint8_t* d, size_t n, size_t w) {
+    const size_t nw = n / w;
+    for (size_t i = 0; i < nw; ++i)
+        for (size_t j = 0; j < w; ++j) d[i * w + j] = s[j * nw + i];
+    std::memcpy(d + nw * w, s + nw * w, n - nw * w);
+}
+static void xf_forward(int id, const uint8_t* src, uint8_t* dst, uint8_t* scratch, size_t n) {
+    if (id == XF_SHUF8) xf_shuffle(src, dst, n, 8);
+    else if (id == XF_SHUF4) xf_shuffle(src, dst, n, 4);
+    else {                                          // delta of 32-bit words, then plane shuffle
+        const size_t nw = n / 4;
+        uint32_t prev = 0;
+        for (size_t i = 0; i < nw; ++i) {
+            uint32_t v; std::memcpy(&v, src + i * 4, 4);
+            const uint32_t x = v - prev; prev = v;
+            std::memcpy(scratch + i * 4, &x, 4);
+        }
+        std::memcpy(scratch + nw * 4, src + nw * 4, n - nw * 4);
+        xf_shuffle(scratch, dst, n, 4);
+    }
+}
+static void xf_inverse(int id, const uint8_t* src, uint8_t* dst, uint8_t* scratch, size_t n) {
+    if (id == XF_SHUF8) xf_unshuffle(src, dst, n, 8);
+    else if (id == XF_SHUF4) xf_unshuffle(src, dst, n, 4);
+    else {
+        xf_unshuffle(src, scratch, n, 4);
+        const size_t nw = n / 4;
+        uint32_t prev = 0;
+        for (size_t i = 0; i < nw; ++i) {
+            uint32_t x; std::memcpy(&x, scratch + i * 4, 4);
+            prev += x;
+            std::memcpy(dst + i * 4, &prev, 4);
+        }
+        std::memcpy(dst + nw * 4, scratch + nw * 4, n - nw * 4);
+    }
+}
+
+static size_t page3_core(const uint8_t* page, size_t n, uint8_t* out, int level) {
     if (n == 0) return 0;
     if (all_same_bytes(page, n)) {
         const size_t sz = page[0] == 0 ? 1 : 2;
@@ -719,6 +767,31 @@ size_t page3_compress(const uint8_t* page, size_t n, uint8_t* out, int level) {
     return best < n ? best : 0;
 }
 
+size_t page3_compress(const uint8_t* page, size_t n, uint8_t* out, int level) {
+    if (level < 6) return page3_core(page, n, out, level);
+    // level 6: the level-5 result, or the same page after a word transform when that is smaller.
+    const size_t base = page3_core(page, n, out, 5);
+    if (n < 64 || n > kPage2Max || (base && out[0] <= PAGE_FILL)) return base;     // zero/fill pages: nothing to gain
+    uint8_t xf[kPage2Max + 8], scratch[kPage2Max + 8], blob[kPage2Max * 2 + 512];
+    // cheap screen: chained parse without entropy stage for each transform, against the same for the identity
+    const size_t ref = page3_core(page, n, blob, 2);
+    size_t bestc = ref ? ref : n;
+    int bid = 0;
+    for (int id = 1; id < XF_COUNT; ++id) {
+        xf_forward(id, page, xf, scratch, n);
+        const size_t c = page3_core(xf, n, blob, 2);
+        if (c && c < bestc) { bestc = c; bid = id; }
+    }
+    if (!bid || bestc * 100 > (ref ? ref : n) * 97) return base;                   // not a clear win: skip the expensive pass
+    xf_forward(bid, page, xf, scratch, n);
+    const size_t c = page3_core(xf, n, blob, 5);
+    if (!c || c + 2 >= (base ? base : n)) return base;
+    out[0] = PAGE_XFORM;
+    out[1] = uint8_t(bid);
+    std::memcpy(out + 2, blob, c);
+    return c + 2;
+}
+
 bool page3_decompress(const uint8_t* enc, size_t len, uint8_t* page, size_t n) {
     if (len == 0) return false;
     switch (enc[0]) {
@@ -727,6 +800,15 @@ bool page3_decompress(const uint8_t* enc, size_t len, uint8_t* page, size_t n) {
         case PAGE_LZ2: return n <= kPage2Max && decode_impl<true, 0>(enc + 1, len - 1, page, n, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
         case PAGE_HUF: return n <= kPage2Max && page3_unhuf(enc + 1, len - 1, page, n);
         case PAGE_SPLIT: return n <= kPage2Max && page3_unsplit(enc + 1, len - 1, page, n);
+        case PAGE_XFORM: {
+            if (len < 3 || n > kPage2Max || n < 64 || enc[1] == 0 || enc[1] >= XF_COUNT) return false;
+            const uint8_t k = enc[2];                       // the inner blob must be a plain page3 kind, never another XFORM
+            if (k == PAGE_XFORM || k > PAGE_SPLIT || k == PAGE_RAW || k == PAGE_LZ) return false;
+            uint8_t xf[kPage2Max + 8], scratch[kPage2Max + 8];
+            if (!page3_decompress(enc + 2, len - 2, xf, n)) return false;
+            xf_inverse(enc[1], xf, page, scratch, n);
+            return true;
+        }
         default: return false;
     }
 }
@@ -968,10 +1050,10 @@ size_t page_compress(const uint8_t* page, size_t n, uint8_t* out, int level, uns
     if (n == 0) return 0;
     if (level >= 3) {
         if (n <= kPage2Max) {                       // page formats v2/v3 (not LZ4 compatible), see fast.hpp
-            const size_t c = page3_compress(page, n, out, level - 2);
+            const size_t c = page3_compress(page, n, out, level - 2);   // public 3..8 = page3 1..6
             return (c == 0 || c * 100 > n * size_t(max_pct)) ? 0 : c;
         }
-        level = (level % 2 == 0 || level == 7) ? 2 : 1;   // larger pages: fall back to the LZ4-format codec
+        level = (level % 2 == 0 || level >= 7) ? 2 : 1;   // larger pages: fall back to the LZ4-format codec
     }
     if (all_same(page, n)) {
         if (page[0] == 0) { out[0] = PAGE_ZERO; return 1; }
@@ -1005,6 +1087,7 @@ bool page_decompress(const uint8_t* enc, size_t len, uint8_t* page, size_t n) {
         case PAGE_LZ2:
         case PAGE_HUF:
         case PAGE_SPLIT:
+        case PAGE_XFORM:
             return page3_decompress(enc, len, page, n);
         default:
             return false;

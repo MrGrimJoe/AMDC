@@ -420,6 +420,30 @@ static std::vector<Bytes> page_samples(size_t n) {
     v.push_back(texty(n)); v.push_back(rnd(n, 3)); v.push_back(rnd(n, 16)); v.push_back(rnd(n, 64)); v.push_back(rnd(n));
     v.push_back(periodic(n, 7)); v.push_back(periodic(n, 100)); v.push_back(periodic(n, 700));
     v.push_back(structured(n, 8)); v.push_back(structured(n, 24)); v.push_back(structured(n, 64));
+    for (int kind = 0; kind < 7; ++kind) {              // pointer / counter / index / float-like word arrays (word-transform fodder)
+        Bytes w(n);
+        uint64_t base = 0x00007f3a12000000ull + (rng() & 0xffff0000ull), ctr = rng() & 0xffff;
+        for (size_t i = 0; i + 8 <= n; i += 8) {
+            uint64_t x = 0;
+            if (kind >= 4) {                                                       // 32-bit element arrays
+                for (int h = 0; h < 2; ++h) {
+                    uint32_t y = kind == 4 ? uint32_t(ctr += rng() % 5)            // slowly growing 32-bit counters
+                               : kind == 5 ? 0x08040000u + uint32_t(rng() % 60000)  // 32-bit addresses, shared high bytes
+                                           : 0x3f800000u + uint32_t(rng() % 4096) * 2;   // floats near 1.0
+                    std::memcpy(&w[i + 4 * h], &y, 4);
+                }
+                continue;
+            }
+            switch (kind) {
+                case 0: x = base + (rng() % 4096) * 16; break;                     // heap pointers
+                case 1: x = ctr += 1 + rng() % 3; break;                           // increasing counters
+                case 2: x = uint64_t(rng() % 1000) | (uint64_t(rng() % 7) << 32); break;   // small ints, 32-bit halves
+                default: x = 0x4000000000000000ull | (uint64_t(rng() & 0xfffff) << 20); break;   // doubles of similar magnitude
+            }
+            std::memcpy(&w[i], &x, 8);
+        }
+        v.push_back(w);
+    }
     Bytes mix = texty(n);
     for (size_t i = n / 3; i < n / 2; ++i) mix[i] = uint8_t(rng());
     v.push_back(mix);
@@ -427,14 +451,15 @@ static std::vector<Bytes> page_samples(size_t n) {
 }
 
 static void test_page3() {
-    size_t huf_used = 0, lz2_used = 0, seqc_used = 0, litc_used = 0, split3_used = 0;
+    size_t huf_used = 0, lz2_used = 0, seqc_used = 0, litc_used = 0, split3_used = 0, xf_used[4] = {0, 0, 0, 0};
     for (size_t n : {size_t(1), size_t(15), size_t(16), size_t(17), size_t(100), size_t(511), size_t(1000), size_t(4095), size_t(4096), size_t(4336)}) {
         for (const Bytes& pg : page_samples(n)) {
             Bytes enc(page3_bound(n)), out(n);
-            for (int lvl = 1; lvl <= 5; ++lvl) {
+            for (int lvl = 1; lvl <= 6; ++lvl) {
                 size_t c = page3_compress(pg.data(), n, enc.data(), lvl);
                 if (!c) continue;
                 CHECK(c < n);
+                if (enc[0] == PAGE_XFORM) { CHECK(enc[1] >= 1 && enc[1] <= 3); ++xf_used[enc[1]]; }
                 if (enc[0] == PAGE_HUF) { ++huf_used; litc_used += (enc[1] & 1) != 0; }
                 if (enc[0] == PAGE_SPLIT) { ++seqc_used; int nb = 0; for (int q = 0; q < 4; ++q) nb += (enc[1] >> q) & 1; if (nb >= 3) ++split3_used; }
                 if (enc[0] == PAGE_LZ2) ++lz2_used;
@@ -458,6 +483,8 @@ static void test_page3() {
         }
     }
     CHECK(huf_used > 20 && lz2_used > 20 && seqc_used > 10 && litc_used > 20 && split3_used > 5);   // every blob variant is really exercised
+    CHECK(xf_used[1] > 0 && xf_used[2] > 0 && xf_used[3] > 0);        // all three transforms are really exercised
+    std::printf("page3 transforms: shuf8 %zu, shuf4 %zu, delta4+shuf4 %zu\n", xf_used[1], xf_used[2], xf_used[3]);
     std::printf("page3 kinds exercised: huf %zu (lit-coded %zu), split %zu (3+ parts coded %zu), lz2 %zu\n", huf_used, litc_used, seqc_used, split3_used, lz2_used);
 }
 
@@ -467,7 +494,7 @@ static void test_page3_mutation() {
     size_t decoded_ok = 0, total = 0;
     for (size_t n : {size_t(300), size_t(2048), size_t(4096)}) {
         for (const Bytes& pg : page_samples(n)) {
-            for (int lvl : {1, 3, 4, 5}) {
+            for (int lvl : {1, 3, 4, 5, 6}) {
                 Bytes enc(page3_bound(n));
                 size_t c = page3_compress(pg.data(), n, enc.data(), lvl);
                 if (c < 4) continue;
