@@ -58,6 +58,38 @@ inline size_t page_encode_bound(size_t page) { return block_bound(page) + 17; }
 size_t page_compress(const uint8_t* page, size_t page_size, uint8_t* out, int level = 1, unsigned max_pct = 75);
 bool page_decompress(const uint8_t* enc, size_t enc_len, uint8_t* page, size_t page_size);
 
+// ---- batch API: many pages at once on a persistent thread pool ----------------------------------------
+// Pages are independent, so compression and decompression scale with cores. A PagePool keeps its worker threads alive
+// between calls (a call costs a wake-up, not thread creation), so it is cheap enough to use every frame or every
+// swap-out batch. One batch runs at a time per pool (calls from several threads are serialised); use one pool per
+// subsystem if you need concurrency. Batches smaller than 32 pages run on the calling thread.
+struct PageRef {
+    const uint8_t* data;
+    size_t len;
+};
+class PagePool {
+public:
+    explicit PagePool(unsigned threads = 0);   // 0 = std::thread::hardware_concurrency()
+    ~PagePool();
+    PagePool(const PagePool&) = delete;
+    PagePool& operator=(const PagePool&) = delete;
+    unsigned threads() const;                  // workers + the calling thread
+
+    // `count` pages of `page_size` bytes laid out back to back at `src`. Page i is encoded into dst + i * dst_stride
+    // (dst_stride >= page_encode_bound(page_size)); out_len[i] is its encoded size, or 0 when the page is not worth
+    // compressing (keep it raw). Same per-page result as page_compress(), for any thread count.
+    void compress(const uint8_t* src, size_t page_size, size_t count, uint8_t* dst, size_t dst_stride, size_t* out_len,
+                  int level = 1, unsigned max_pct = 75);
+
+    // Decodes refs[i] into dst + i * page_size. Returns how many pages failed to decode (0 = all good); the bytes of
+    // a failed page are unspecified.
+    size_t decompress(const PageRef* refs, size_t count, uint8_t* dst, size_t page_size);
+
+private:
+    struct Impl;
+    Impl* impl_;
+};
+
 // ---- container ("AMDF"): independent blocks, parallel encode and decode ---------------------------
 constexpr size_t kDefaultBlock = size_t(256) << 10;
 Bytes compress(const Bytes& in, size_t block_size = kDefaultBlock, int level = 1, unsigned threads = 0,

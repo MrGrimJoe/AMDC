@@ -2,9 +2,10 @@ CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -O3 -Wall -Wextra -pthread
 CM_SRC   := src/cm.cpp src/transforms.cpp src/container.cpp
 FAST_SRC := src/fast.cpp
+CAPI_SRC := src/fast.cpp src/amdcf_c.cpp
 BWT_SRC  := src/bwt.cpp src/bwtcodec.cpp
 
-all: build/amdc1 build/amdcf build/amdcb build/test_amdc1 build/test_fast build/test_bwt build/amdcs build/test_solid
+all: build/amdc1 build/amdcf build/amdcb build/test_amdc1 build/test_fast build/test_bwt build/amdcs build/test_solid build/test_capi
 
 build:
 	mkdir -p build
@@ -36,6 +37,13 @@ build/test_amdc1: $(CM_SRC) tests/test_amdc1.cpp src/amdc1.hpp src/transforms.hp
 build/test_fast: $(FAST_SRC) tests/test_fast.cpp src/fast.hpp src/pagecache.hpp | build
 	$(CXX) $(CXXFLAGS) $(FAST_SRC) tests/test_fast.cpp -o $@
 
+build/test_capi: $(CAPI_SRC) tests/test_capi.c src/amdcf.h src/fast.hpp | build
+	$(CC) -std=c11 -Wall -Wextra -c tests/test_capi.c -o build/test_capi.o
+	$(CXX) $(CXXFLAGS) $(CAPI_SRC) build/test_capi.o -o $@
+
+build/bench_pool: $(FAST_SRC) bench/bench_pool.cpp src/fast.hpp | build
+	$(CXX) $(CXXFLAGS) -march=native $(FAST_SRC) bench/bench_pool.cpp -o $@
+
 build/bench_matchcopy: $(FAST_SRC) bench/matchcopy_bench.cpp src/fast.hpp | build
 	$(CXX) $(CXXFLAGS) $(FAST_SRC) bench/matchcopy_bench.cpp -o $@
 
@@ -50,6 +58,7 @@ crosscheck-fast: build/amdcf
 test: all
 	./build/test_amdc1
 	./build/test_fast
+	./build/test_capi
 	./build/test_solid
 	./build/test_bwt
 	sh tests/crosscheck.sh
@@ -59,6 +68,9 @@ test: all
 sanitize: | build
 	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -pthread $(FAST_SRC) tests/test_fast.cpp -o build/test_fast_san
 	./build/test_fast_san
+	$(CC) -std=c11 -Wall -Wextra -c tests/test_capi.c -o build/test_capi_san.o
+	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -pthread $(CAPI_SRC) build/test_capi_san.o -o build/test_capi_san
+	./build/test_capi_san
 	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -pthread $(FAST_SRC) src/solid.cpp tests/test_solid.cpp -o build/test_solid_san
 	./build/test_solid_san
 	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -pthread $(BWT_SRC) tests/test_bwt.cpp -o build/test_bwt_san

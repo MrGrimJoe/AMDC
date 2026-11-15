@@ -7,7 +7,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 find_package(Threads REQUIRED)
 
-add_library(amdcf STATIC src/fast.cpp)                       # fast-decode codec: link this into your own program
+add_library(amdcf STATIC src/fast.cpp src/amdcf_c.cpp)                       # fast-decode codec: link this into your own program
 target_include_directories(amdcf PUBLIC src)
 target_link_libraries(amdcf PUBLIC Threads::Threads)
 

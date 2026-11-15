@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
 #include <cstring>
 #include <thread>
 
@@ -1430,6 +1433,95 @@ bool page_decompress(const uint8_t* enc, size_t len, uint8_t* page, size_t n) {
         default:
             return false;
     }
+}
+
+// ---------------------------------------------------------------------------------------------------
+// PagePool: persistent workers, dynamic chunking over a page range. Every batch wakes all workers and waits until each
+// has acknowledged it, which keeps the hand-over trivially correct (no worker can still be inside an old batch).
+struct PagePool::Impl {
+    std::vector<std::thread> workers;
+    std::mutex call_m, m;
+    std::condition_variable cv_work, cv_done;
+    const std::function<void(size_t, size_t)>* job = nullptr;
+    size_t count = 0, chunk = 1;
+    std::atomic<size_t> next{0};
+    size_t pending = 0;
+    uint64_t gen = 0;
+    bool stop = false;
+
+    void run_chunks() {
+        for (;;) {
+            const size_t b = next.fetch_add(chunk, std::memory_order_relaxed);
+            if (b >= count) return;
+            (*job)(b, std::min(b + chunk, count));
+        }
+    }
+    void worker() {
+        uint64_t seen = 0;
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lk(m);
+                cv_work.wait(lk, [&] { return stop || gen != seen; });
+                if (stop) return;
+                seen = gen;
+            }
+            run_chunks();
+            std::lock_guard<std::mutex> lk(m);
+            if (--pending == 0) cv_done.notify_one();
+        }
+    }
+    void run(size_t n, const std::function<void(size_t, size_t)>& fn) {
+        if (workers.empty() || n < 32) { fn(0, n); return; }
+        std::lock_guard<std::mutex> call(call_m);
+        {
+            std::lock_guard<std::mutex> lk(m);
+            job = &fn;
+            count = n;
+            chunk = std::max<size_t>(4, std::min<size_t>(64, n / ((workers.size() + 1) * 8)));
+            next.store(0, std::memory_order_relaxed);
+            pending = workers.size();
+            ++gen;
+        }
+        cv_work.notify_all();
+        run_chunks();
+        std::unique_lock<std::mutex> lk(m);
+        cv_done.wait(lk, [&] { return pending == 0; });
+        job = nullptr;
+    }
+};
+
+PagePool::PagePool(unsigned threads) : impl_(new Impl) {
+    if (!threads) threads = std::max(1u, std::thread::hardware_concurrency());
+    try {
+        for (unsigned i = 1; i < threads; ++i) impl_->workers.emplace_back([this] { impl_->worker(); });
+    } catch (...) {   // could not start every thread: carry on with the ones that exist
+    }
+}
+PagePool::~PagePool() {
+    {
+        std::lock_guard<std::mutex> lk(impl_->m);
+        impl_->stop = true;
+    }
+    impl_->cv_work.notify_all();
+    for (auto& t : impl_->workers) t.join();
+    delete impl_;
+}
+unsigned PagePool::threads() const { return unsigned(impl_->workers.size()) + 1; }
+
+void PagePool::compress(const uint8_t* src, size_t page_size, size_t count, uint8_t* dst, size_t dst_stride, size_t* out_len,
+                        int level, unsigned max_pct) {
+    impl_->run(count, [&](size_t b, size_t e) {
+        for (size_t i = b; i < e; ++i) out_len[i] = page_compress(src + i * page_size, page_size, dst + i * dst_stride, level, max_pct);
+    });
+}
+size_t PagePool::decompress(const PageRef* refs, size_t count, uint8_t* dst, size_t page_size) {
+    std::atomic<size_t> bad{0};
+    impl_->run(count, [&](size_t b, size_t e) {
+        size_t local = 0;
+        for (size_t i = b; i < e; ++i) local += !page_decompress(refs[i].data, refs[i].len, dst + i * page_size, page_size);
+        if (local) bad.fetch_add(local, std::memory_order_relaxed);
+    });
+    return bad.load();
 }
 
 // ---------------------------------------------------------------------------------------------------

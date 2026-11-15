@@ -66,6 +66,18 @@ Bytes z = compress(data, kDefaultBlock, /*level*/2, /*threads*/0);
 decompress_into(z.data(), z.size(), dst, dst_cap, /*threads*/8);   // allocation-free
 ```
 
+```cpp
+// 4) many pages at once on all cores (persistent threads; cheap enough to call every frame)
+PagePool pool;                                       // 0 = one thread per hardware thread
+std::vector<uint8_t> enc(count * page_encode_bound(4096));
+std::vector<size_t> len(count);
+pool.compress(pages, 4096, count, enc.data(), page_encode_bound(4096), len.data(), /*level*/1);   // len[i] == 0: keep raw
+pool.decompress(refs, n_refs, out, 4096);            // returns the number of pages that failed to decode
+```
+
+From C, C#, Rust, Python (ctypes) and game engines: `src/amdcf.h` (`amdcf_page_compress`, `amdcf_pool_compress`, ...), built
+from `src/fast.cpp` + `src/amdcf_c.cpp`.
+
 CLI: `amdcf compress|decompress|bench|ramsim ...` (see `amdcf` with no arguments). Build with `make` (Linux/macOS),
 `make windows` (MinGW-w64 cross-build) or CMake (`cmake -B build && cmake --build build --config Release`, works with MSVC).
 Little-endian targets only, which covers every Windows target (x64 and ARM64).
@@ -244,3 +256,24 @@ interleaved runs on the synthetic corpus, one core: level 1 compress went from a
 
 I also tried a word-dictionary page codec in the style of macOS's WKdm as a speed level. It compressed 1.4-2x faster than
 LZ4 on word-structured pages but decoded slower than LZ4 and gave a worse ratio, so it was dropped.
+
+## Picking a level, and using more than one core (new)
+
+| level | use it when | measured size / decode speed (1 core, synthetic corpus) |
+|---|---|---|
+| 1 | swap-out speed matters most; LZ4-compatible | 41.5% / ~3 GB/s, compresses at about LZ4's speed |
+| 2 | LZ4-compatible but smaller | 37.5% / ~3.8 GB/s, compresses ~6x slower than level 1 |
+| 3-4 | page format, faster to compress than 2 | 37.2%, 34.4% / 2.2-2.8 GB/s |
+| 5-6 | add Huffman literals | 33.3%, 30.9% / ~1.3-1.4 GB/s |
+| 7 | smallest LZ-only | 27.7% / ~1 GB/s |
+| 8 | smallest; word-structured pages (numbers, pointers, floats) | 25.2% / ~1.1 GB/s, compresses at ~70 MB/s |
+
+Pages are independent, so `PagePool` scales with cores. Measured on the 2-core test VM with `bench/bench_pool.cpp`
+(mixed + Python-object + text pages, 302 MB): 1 to 2 threads gave 1.8-2.2x for both directions at every level (for example
+level 1 compress 0.81 -> 1.79 GB/s, decode 2.35 -> 4.69 GB/s; level 5 decode 1.27 -> 2.48 GB/s). **Only 2 threads could be
+measured**; more cores are expected to scale about linearly until memory bandwidth is the limit, but that is not measured.
+There is no GPU path: LZ-family decoding is serial per page and a 4 KiB page is too small to feed a GPU, so none is planned.
+
+Tests: the pool is compared byte-for-byte with sequential `page_compress` for levels 1, 2, 3, 5, 8 and thread counts 1, 2, 3, 8,
+failure counting is checked with deliberately corrupted blobs, and four threads share one pool concurrently under
+ASan/UBSan and ThreadSanitizer. The C header is compiled as C11 and round-tripped in `tests/test_capi.c`.

@@ -558,6 +558,74 @@ static void test_page3_mutation() {
     std::printf("page3 mutation: %zu blobs, %zu still decoded\n", total, decoded_ok);
 }
 
+static void test_pool() {
+    // a pool must give exactly the per-page result of page_compress for any thread count, round-trip, and count failures
+    const size_t P = 4096;
+    for (size_t count : {size_t(0), size_t(1), size_t(31), size_t(32), size_t(33), size_t(257), size_t(1000)}) {
+        Bytes mem(count * P);
+        std::vector<Bytes> shapes = page_samples(P);
+        for (size_t i = 0; i < count; ++i) std::memcpy(&mem[i * P], shapes[(i * 7 + i / 3) % shapes.size()].data(), P);
+        for (int level : {1, 2, 3, 5, 8}) {
+            const size_t stride = page_encode_bound(P);
+            std::vector<uint8_t> ref(count * stride + 1);
+            std::vector<size_t> ref_len(count);
+            for (size_t i = 0; i < count; ++i) ref_len[i] = page_compress(&mem[i * P], P, &ref[i * stride], level);
+            for (unsigned th : {1u, 2u, 3u, 8u}) {
+                PagePool pool(th);
+                CHECK(pool.threads() >= 1);
+                std::vector<uint8_t> enc(count * stride + 1);
+                std::vector<size_t> len(count, 12345);
+                pool.compress(mem.data(), P, count, enc.data(), stride, len.data(), level);
+                std::vector<PageRef> refs(count);
+                bool same = true;
+                for (size_t i = 0; i < count; ++i) {
+                    same &= len[i] == ref_len[i] && std::memcmp(&enc[i * stride], &ref[i * stride], len[i]) == 0;
+                    refs[i] = PageRef{&enc[i * stride], len[i]};
+                }
+                CHECK(same);
+                // pages that did not compress are stored raw by the caller; decode only the compressed ones
+                std::vector<PageRef> good;
+                std::vector<size_t> idx;
+                for (size_t i = 0; i < count; ++i) if (len[i]) { good.push_back(refs[i]); idx.push_back(i); }
+                Bytes out(good.size() * P + 1, 0x77);
+                CHECK(pool.decompress(good.data(), good.size(), out.data(), P) == 0);
+                bool ok = true;
+                for (size_t k = 0; k < idx.size(); ++k) ok &= std::memcmp(&out[k * P], &mem[idx[k] * P], P) == 0;
+                CHECK(ok);
+                if (good.size() >= 40) {    // corrupt three blobs: exactly those must be reported
+                    std::vector<PageRef> bad = good;
+                    Bytes junk(8, 0xFF);
+                    bad[1] = PageRef{junk.data(), junk.size()};
+                    bad[good.size() / 2] = PageRef{junk.data(), 0};
+                    bad[good.size() - 1] = PageRef{junk.data(), junk.size()};
+                    CHECK(pool.decompress(bad.data(), bad.size(), out.data(), P) == 3);
+                }
+            }
+        }
+    }
+    // the same pool used repeatedly, and from several threads at once (calls are serialised)
+    PagePool pool(4);
+    Bytes mem(200 * P);
+    for (auto& c : mem) c = uint8_t(rng() % 5);
+    std::vector<std::thread> callers;
+    std::atomic<int> okc{0};
+    for (int t = 0; t < 4; ++t)
+        callers.emplace_back([&] {
+            const size_t stride = page_encode_bound(P);
+            std::vector<uint8_t> enc(200 * stride);
+            std::vector<size_t> len(200);
+            for (int rep = 0; rep < 20; ++rep) {
+                pool.compress(mem.data(), P, 200, enc.data(), stride, len.data(), 1);
+                std::vector<PageRef> refs;
+                for (size_t i = 0; i < 200; ++i) if (len[i]) refs.push_back(PageRef{&enc[i * stride], len[i]});
+                Bytes out(refs.size() * P);
+                if (pool.decompress(refs.data(), refs.size(), out.data(), P) == 0) ++okc;
+            }
+        });
+    for (auto& c : callers) c.join();
+    CHECK(okc == 80);
+}
+
 int main() {
     test_blocks();
     test_tight_match_copy();
@@ -571,6 +639,7 @@ int main() {
     test_page3();
     test_page3_mutation();
     test_cache_concurrency();
+    test_pool();
     std::printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }
