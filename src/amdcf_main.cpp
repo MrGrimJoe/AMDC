@@ -49,8 +49,8 @@ static int usage() {
         "  amdcf ramsim     [-l 1|2] [-p PAGE] [-r REPS] FILE... split files into pages, compress each page\n"
         "                   like a RAM compressor would, report RAM saved and per-page decode latency\n"
         "'-' = stdin/stdout. Level 1 = fastest compress, level 2 = smaller (same decode speed).\n"
-        "ramsim also takes -l 3..6 (page formats v2/v3, not LZ4-compatible): 3/4 = LZ with short offsets (fast/chained),\n"
-        "5/6 = the same plus Huffman literals (5 = best balance, 6 = smallest).\n",
+        "ramsim also takes -l 3..7 (page formats v2/v3, not LZ4-compatible): 3/4 = LZ with short offsets (fast/chained),\n"
+        "5/6 = the same plus Huffman literals, 7 = chained parse with literals and sequence bytes both Huffman coded (smallest).\n",
         stderr);
     return 64;
 }
@@ -151,7 +151,7 @@ int main(int argc, char** argv) {
             else return usage();
         } catch (const std::exception& e) { std::fprintf(stderr, "error: %s\n", e.what()); return 64; }
     }
-    if (level < 1 || level > 6 || page < 64 || (level > 2 && cmd != "ramsim")) return usage();
+    if (level < 1 || level > 7 || page < 64 || (level > 2 && cmd != "ramsim")) return usage();
     try {
         if (cmd == "compress" && pos.size() == 2) {
             auto t = Clock::now();

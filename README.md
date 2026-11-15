@@ -4,7 +4,7 @@ Three lossless codecs in one repo.
 
 * **`amdc1`: maximum ratio** (context mixing, format v4). Spec: `docs/AMDC-1_Specification_v1.4.md`.
 * **`amdcb`: middle tier, experimental** (BWT + context-mixed ranks), about 5 MB/s compress and 10 MB/s decompress per core, ratio between bzip2 and xz. See `docs/AMDC-B_BWT_Tier.md`.
-* **`amdcf`: maximum decode speed** (LZ4-compatible LZ77), ~2-4 GB/s per core, with a RAM page codec and compressed page cache. Page levels 3-6 (not LZ4-compatible) trade some decode speed for 4-10 points smaller pages than LZ4. See `docs/AMDC-F_Fast_Mode.md`.
+* **`amdcf`: maximum decode speed** (LZ4-compatible LZ77), ~2-4 GB/s per core, with a RAM page codec and compressed page cache. Page levels 3-7 (not LZ4-compatible) trade some decode speed for 4-13 points smaller pages than LZ4. See `docs/AMDC-F_Fast_Mode.md`.
 
 `amdc1`: reversible transforms (delta/xor/shuffle, x86 call filter, image residuals, automatic record-length detection) + 15 hashed context
 models with check bytes (12 with bit-history states) + 2 match models, mixed by a two-layer logistic mixer network, refined by two APM stages and coded with a

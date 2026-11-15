@@ -453,40 +453,16 @@ struct BitR {
 };
 }  // namespace
 
-size_t page3_huf(const uint8_t* lz2, size_t lzlen, uint8_t* out) {
-    // split the page2 stream into literals + literal-free sequences
-    uint8_t lits[kPage2Max + 32];
-    uint8_t seq[kPage2Max * 2 + 64];
-    size_t nlit = 0, ns = 0;
-    const uint8_t* ip = lz2;
-    const uint8_t* const e = lz2 + lzlen;
-    for (;;) {
-        const uint8_t t = *ip++;
-        seq[ns++] = t;
-        size_t lit = t >> 4;
-        if (lit == 15) { uint8_t b; do { b = *ip++; seq[ns++] = b; lit += b; } while (b == 255); }
-        std::memcpy(lits + nlit, ip, lit);
-        nlit += lit; ip += lit;
-        if (ip >= e) break;
-        const uint8_t o = *ip++;
-        seq[ns++] = o;
-        if (o >= 0xF0) seq[ns++] = *ip++;
-        if ((t & 15) == 15) { uint8_t b; do { b = *ip++; seq[ns++] = b; } while (b == 255); }
-    }
-    if (nlit < 96) return 0;
+// A Huffman block is [code-length nibbles][u16 stream length x4][4 bit streams]; the symbol count is stored by the
+// caller. Returns the bytes written, or 0 when the data cannot be coded (fewer than 2 distinct symbols).
+static size_t huf_enc_block(const uint8_t* d, size_t n, uint8_t* out) {
     uint32_t freq[256] = {0};
-    for (size_t i = 0; i < nlit; ++i) freq[lits[i]]++;
+    for (size_t i = 0; i < n; ++i) freq[d[i]]++;
     uint8_t len[256];
     if (!huff_lengths(freq, len)) return 0;
-    // cheap bound: if the coded literals plus header cannot beat the raw literals, stop here
     HufEnc he;
     huff_codes(len, he);
-    uint64_t bits = 0;
-    for (int i = 0; i < 256; ++i) bits += uint64_t(freq[i]) * len[i];
-    if ((bits + 7) / 8 + 70 >= nlit) return 0;
-
     uint8_t* op = out;
-    // header: nibbles
     uint8_t nib[512];
     int nn = 0;
     for (int i = 0; i < 256;) {
@@ -498,28 +474,25 @@ size_t page3_huf(const uint8_t* lz2, size_t lzlen, uint8_t* out) {
     }
     for (int i = 0; i < nn; i += 2) *op++ = uint8_t(nib[i] | ((i + 1 < nn ? nib[i + 1] : 0) << 4));
     uint8_t* const hdr = op;
-    op += 10;
+    op += 8;
     // four streams over four consecutive quarters (the first three have q symbols, the last the rest)
-    const size_t q = (nlit + 3) / 4;
-    size_t slen[4];
+    const size_t q = (n + 3) / 4;
     uint8_t* sp = op;
     for (int k = 0; k < 4; ++k) {
-        const size_t b0 = std::min(nlit, size_t(k) * q), b1 = std::min(nlit, size_t(k + 1) * q);
+        const size_t b0 = std::min(n, size_t(k) * q), b1 = std::min(n, size_t(k + 1) * q);
         BitW w{sp};
-        for (size_t i = b0; i < b1; ++i) w.put(he.code[lits[i]], len[lits[i]]);
+        for (size_t i = b0; i < b1; ++i) w.put(he.code[d[i]], len[d[i]]);
         w.flush();
-        slen[k] = size_t(w.out - sp);
+        wr16(hdr + 2 * k, unsigned(w.out - sp));
         sp = w.out;
     }
-    wr16(hdr, unsigned(nlit)); wr16(hdr + 2, unsigned(slen[0])); wr16(hdr + 4, unsigned(slen[1])); wr16(hdr + 6, unsigned(slen[2])); wr16(hdr + 8, unsigned(slen[3]));
-    op = sp;
-    std::memcpy(op, seq, ns);
-    op += ns;
-    return size_t(op - out);
+    return size_t(sp - out);
 }
 
-bool page3_unhuf(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen) {
-    const uint8_t* const iend = ip + inlen;
+// Decodes a block written by huf_enc_block into out[0..n) and advances ip past it. Never reads outside
+// [ip, iend) and never writes outside out[0..n).
+static bool huf_dec_block(const uint8_t*& ipr, const uint8_t* iend, size_t n, uint8_t* out) {
+    const uint8_t* ip = ipr;
     uint8_t len[256];
     int sym = 0;
     bool have_hi = false; unsigned cur = 0;
@@ -537,22 +510,21 @@ bool page3_unhuf(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen) {
         sym += int(r) + 1;
         if (sym > 256) return false;
     }
-    if (iend - ip < 10) return false;
-    const size_t nlit = rd16(ip), l0 = rd16(ip + 2), l1 = rd16(ip + 4), l2 = rd16(ip + 6), l3 = rd16(ip + 8);
-    ip += 10;
-    if (nlit == 0 || nlit > outlen || nlit > kPage2Max || l0 + l1 + l2 + l3 > size_t(iend - ip)) return false;
+    if (iend - ip < 8) return false;
+    const size_t l0 = rd16(ip), l1 = rd16(ip + 2), l2 = rd16(ip + 4), l3 = rd16(ip + 6);
+    ip += 8;
+    if (l0 + l1 + l2 + l3 > size_t(iend - ip)) return false;
     uint16_t tab[1 << HUF_MAXLEN];
     const int tb = huff_table(len, tab);
     if (!tb) return false;
     const unsigned mask = (1u << tb) - 1;
-    uint8_t lit[kPage2Max + 32];
-    const size_t q = (nlit + 3) / 4;
+    const size_t q = (n + 3) / 4;
     size_t cnt[4];
-    for (int k = 0; k < 4; ++k) cnt[k] = std::min(nlit, size_t(k + 1) * q) - std::min(nlit, size_t(k) * q);
+    for (int k = 0; k < 4; ++k) cnt[k] = std::min(n, size_t(k + 1) * q) - std::min(n, size_t(k) * q);
     BitR S[4] = {{ip, ip + l0, 0, 0, ip}, {ip + l0, ip + l0 + l1, 0, 0, ip + l0},
                  {ip + l0 + l1, ip + l0 + l1 + l2, 0, 0, ip + l0 + l1}, {ip + l0 + l1 + l2, ip + l0 + l1 + l2 + l3, 0, 0, ip + l0 + l1 + l2}};
-    uint8_t* const o[4] = {lit, lit + q, lit + 2 * q, lit + 3 * q};
-    // all streams: full groups of 5 symbols (each refill leaves >= 56 bits; 5 x 10 bits fit)
+    uint8_t* const o[4] = {out, out + q, out + 2 * q, out + 3 * q};
+    // full groups of 5 symbols on all four streams (each refill leaves >= 56 bits; 5 x 10 bits fit)
     const size_t full = std::min(std::min(cnt[0], cnt[1]), std::min(cnt[2], cnt[3])) / 5 * 5;
     size_t i = 0;
     for (; i < full; i += 5) {
@@ -574,10 +546,80 @@ bool page3_unhuf(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen) {
         }
         if (!S[j].ok()) return false;
     }
-    // quarter k was written at lit + k*q and each ends where the next begins (or at nlit), so lit[] is contiguous
-    const uint8_t* const seq = ip + l0 + l1 + l2 + l3;
+    ipr = ip + l0 + l1 + l2 + l3;
+    return true;
+}
+
+constexpr size_t kSeqMax = kPage2Max * 2 + 64;     // upper bound on the literal-free sequence bytes of one page
+
+// Page v3 payload: flags | u16 nlit | literals (raw, or Huffman block if flags&1) | u16 nseq | sequences (raw, or
+// Huffman block if flags&2). The two blocks are independent, so each is coded only when that is smaller.
+// code_seq = false leaves the sequence bytes raw (cheaper to decode, bigger for compressible pages).
+size_t page3_huf(const uint8_t* lz2, size_t lzlen, uint8_t* out, bool code_seq) {
+    uint8_t lits[kPage2Max + 32];
+    uint8_t seq[kSeqMax];
+    size_t nlit = 0, ns = 0;
+    const uint8_t* ip = lz2;
+    const uint8_t* const e = lz2 + lzlen;
+    for (;;) {
+        const uint8_t t = *ip++;
+        seq[ns++] = t;
+        size_t lit = t >> 4;
+        if (lit == 15) { uint8_t b; do { b = *ip++; seq[ns++] = b; lit += b; } while (b == 255); }
+        std::memcpy(lits + nlit, ip, lit);
+        nlit += lit; ip += lit;
+        if (ip >= e) break;
+        const uint8_t o = *ip++;
+        seq[ns++] = o;
+        if (o >= 0xF0) seq[ns++] = *ip++;
+        if ((t & 15) == 15) { uint8_t b; do { b = *ip++; seq[ns++] = b; } while (b == 255); }
+    }
+    uint8_t tl[kPage2Max * 2 + 600];
+    uint8_t ts[kSeqMax * 2 + 600];
+    size_t cl = nlit >= 32 ? huf_enc_block(lits, nlit, tl) : 0;
+    size_t cs = (code_seq && ns >= 32) ? huf_enc_block(seq, ns, ts) : 0;
+    const bool lc = cl && cl < nlit, sc = cs && cs < ns;
+    uint8_t* op = out;
+    *op++ = uint8_t((lc ? 1 : 0) | (sc ? 2 : 0));
+    wr16(op, unsigned(nlit)); op += 2;
+    if (lc) { std::memcpy(op, tl, cl); op += cl; } else { std::memcpy(op, lits, nlit); op += nlit; }
+    wr16(op, unsigned(ns)); op += 2;
+    if (sc) { std::memcpy(op, ts, cs); op += cs; } else { std::memcpy(op, seq, ns); op += ns; }
+    return size_t(op - out);
+}
+
+bool page3_unhuf(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen) {
+    const uint8_t* const iend = ip + inlen;
+    if (inlen < 5) return false;
+    const unsigned flags = *ip++;
+    if (flags > 3) return false;
+    uint8_t lit[kPage2Max + 32];
+    const size_t nlit = rd16(ip);
+    ip += 2;
+    if (nlit > kPage2Max || nlit > outlen) return false;
+    if (flags & 1) {
+        if (nlit == 0 || !huf_dec_block(ip, iend, nlit, lit)) return false;
+    } else {
+        if (nlit > size_t(iend - ip)) return false;
+        std::memcpy(lit, ip, nlit);
+        ip += nlit;
+    }
     std::memset(lit + nlit, 0, 32);
-    return decode_impl<true, true>(seq, size_t(iend - seq), dst, outlen, lit, lit + nlit);
+    if (iend - ip < 2) return false;
+    const size_t ns = rd16(ip);
+    ip += 2;
+    if (ns > kSeqMax) return false;
+    uint8_t seqbuf[kSeqMax + 32];
+    const uint8_t* seq;
+    if (flags & 2) {
+        if (ns == 0 || !huf_dec_block(ip, iend, ns, seqbuf) || ip != iend) return false;
+        std::memset(seqbuf + ns, 0, 32);
+        seq = seqbuf;
+    } else {
+        if (ns != size_t(iend - ip)) return false;
+        seq = ip;
+    }
+    return decode_impl<true, true>(seq, ns, dst, outlen, lit, lit + nlit);
 }
 
 size_t page2_compress(const uint8_t* src, size_t n, uint8_t* dst, int level) {
@@ -604,12 +646,12 @@ size_t page3_compress(const uint8_t* page, size_t n, uint8_t* out, int level) {
         return sz;
     }
     if (n > kPage2Max) return 0;
-    const size_t c = page2_compress(page, n, out + 1, (level == 2 || level == 4) ? 2 : 1);
+    const size_t c = page2_compress(page, n, out + 1, (level % 2 == 0 || level == 5) ? 2 : 1);   // 1,3 = fast parse
     size_t best = c + 1;
     out[0] = PAGE_LZ2;
     if (level >= 3 && c > 128) {
         uint8_t tmp[kPage2Max * 2 + 512];
-        const size_t h = page3_huf(out + 1, c, tmp + 1);
+        const size_t h = page3_huf(out + 1, c, tmp + 1, level >= 5);
         if (h && h + 1 < best) { std::memcpy(out + 1, tmp + 1, h); out[0] = PAGE_HUF; best = h + 1; }
     }
     return best < n ? best : 0;
@@ -859,7 +901,7 @@ size_t page_compress(const uint8_t* page, size_t n, uint8_t* out, int level, uns
             const size_t c = page3_compress(page, n, out, level - 2);
             return (c == 0 || c * 100 > n * size_t(max_pct)) ? 0 : c;
         }
-        level = level >= 4 ? 2 : 1;                 // larger pages: fall back to the LZ4-format codec
+        level = (level % 2 == 0 || level == 7) ? 2 : 1;   // larger pages: fall back to the LZ4-format codec
     }
     if (all_same(page, n)) {
         if (page[0] == 0) { out[0] = PAGE_ZERO; return 1; }

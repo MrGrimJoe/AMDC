@@ -427,15 +427,15 @@ static std::vector<Bytes> page_samples(size_t n) {
 }
 
 static void test_page3() {
-    size_t huf_used = 0, lz2_used = 0;
+    size_t huf_used = 0, lz2_used = 0, seqc_used = 0, litc_used = 0;
     for (size_t n : {size_t(1), size_t(15), size_t(16), size_t(17), size_t(100), size_t(511), size_t(1000), size_t(4095), size_t(4096), size_t(4336)}) {
         for (const Bytes& pg : page_samples(n)) {
             Bytes enc(page3_bound(n)), out(n);
-            for (int lvl = 1; lvl <= 4; ++lvl) {
+            for (int lvl = 1; lvl <= 5; ++lvl) {
                 size_t c = page3_compress(pg.data(), n, enc.data(), lvl);
                 if (!c) continue;
                 CHECK(c < n);
-                if (enc[0] == PAGE_HUF) ++huf_used;
+                if (enc[0] == PAGE_HUF) { ++huf_used; seqc_used += (enc[1] & 2) != 0; litc_used += (enc[1] & 1) != 0; }
                 if (enc[0] == PAGE_LZ2) ++lz2_used;
                 std::fill(out.begin(), out.end(), 0x55);
                 CHECK(page3_decompress(enc.data(), c, out.data(), n) && out == pg);
@@ -456,8 +456,8 @@ static void test_page3() {
             }
         }
     }
-    CHECK(huf_used > 20 && lz2_used > 20);   // both kinds are really exercised
-    std::printf("page3 kinds exercised: huf %zu, lz2 %zu\n", huf_used, lz2_used);
+    CHECK(huf_used > 20 && lz2_used > 20 && seqc_used > 10 && litc_used > 20);   // every blob variant is really exercised
+    std::printf("page3 kinds exercised: huf %zu (seq-coded %zu, lit-coded %zu), lz2 %zu\n", huf_used, seqc_used, litc_used, lz2_used);
 }
 
 static void test_page3_mutation() {
@@ -466,7 +466,7 @@ static void test_page3_mutation() {
     size_t decoded_ok = 0, total = 0;
     for (size_t n : {size_t(300), size_t(2048), size_t(4096)}) {
         for (const Bytes& pg : page_samples(n)) {
-            for (int lvl : {1, 3, 4}) {
+            for (int lvl : {1, 3, 4, 5}) {
                 Bytes enc(page3_bound(n));
                 size_t c = page3_compress(pg.data(), n, enc.data(), lvl);
                 if (c < 4) continue;

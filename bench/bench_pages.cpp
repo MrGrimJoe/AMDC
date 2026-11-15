@@ -83,8 +83,8 @@ int main(int argc, char** argv) {
             [lv, page](const uint8_t* s, size_t n, uint8_t* d, size_t) { return block_compress(s, n, d, lv); },
             [](const uint8_t* s, size_t n, uint8_t* d, size_t on) { return block_decompress(s, n, d, on); }});
     }
-    if (page <= kPage2Max)   // public page levels 3..6 = page3_compress levels 1..4
-        for (int lv : {1, 2, 3, 4}) {
+    if (page <= kPage2Max)   // public page levels 3..7 = page3_compress levels 1..5
+        for (int lv : {1, 2, 3, 4, 5}) {
             codecs.push_back({"amdcf-L" + std::to_string(lv + 2),
                 [lv](const uint8_t* s, size_t n, uint8_t* d, size_t) { return page3_compress(s, n, d, lv); },
                 [](const uint8_t* s, size_t n, uint8_t* d, size_t on) { return page3_decompress(s, n, d, on); }});
