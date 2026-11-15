@@ -773,16 +773,18 @@ size_t page3_compress(const uint8_t* page, size_t n, uint8_t* out, int level) {
     const size_t base = page3_core(page, n, out, 5);
     if (n < 64 || n > kPage2Max || (base && out[0] <= PAGE_FILL)) return base;     // zero/fill pages: nothing to gain
     uint8_t xf[kPage2Max + 8], scratch[kPage2Max + 8], blob[kPage2Max * 2 + 512];
-    // cheap screen: chained parse without entropy stage for each transform, against the same for the identity
-    const size_t ref = page3_core(page, n, blob, 2);
-    size_t bestc = ref ? ref : n;
+    // screen: count equal neighbouring bytes (what an LZ/entropy stage can exploit) in each transformed page; only the
+    // best-scoring transform gets a full compression pass, and only when it clearly beats the untransformed page
+    auto runs = [n](const uint8_t* p) { size_t r = 0; for (size_t i = 1; i < n; ++i) r += p[i] == p[i - 1]; return r; };
+    const size_t r0 = runs(page);
+    size_t rbest = 0;
     int bid = 0;
     for (int id = 1; id < XF_COUNT; ++id) {
         xf_forward(id, page, xf, scratch, n);
-        const size_t c = page3_core(xf, n, blob, 2);
-        if (c && c < bestc) { bestc = c; bid = id; }
+        const size_t r = runs(xf);
+        if (r > rbest) { rbest = r; bid = id; }
     }
-    if (!bid || bestc * 100 > (ref ? ref : n) * 97) return base;                   // not a clear win: skip the expensive pass
+    if (!bid || rbest < r0 + n / 16) return base;                                  // no clear structure: skip the pass
     xf_forward(bid, page, xf, scratch, n);
     const size_t c = page3_core(xf, n, blob, 5);
     if (!c || c + 2 >= (base ? base : n)) return base;

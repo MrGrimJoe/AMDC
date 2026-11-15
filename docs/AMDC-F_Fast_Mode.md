@@ -120,7 +120,7 @@ The shared VM varies by about +-30% between runs, so compare rows within one run
 | **amdcf level 5** | 33.5% | 255 | 1256 |
 | **amdcf level 6** | 31.0% | 103 | 1378 |
 | **amdcf level 7** | 28.6% | 71 | 871 |
-| **amdcf level 8** (word transform) | **25.7%** | 23 | 1040 |
+| **amdcf level 8** (word transform) | **26.1%** | 60 | 991 |
 | lz4 (fast 1) | 41.3% | 900 | 4323 |
 | lz4hc-3 | 37.7% | 208 | 5067 |
 | zstd 1 | 27.7% | 387 | 940 |
@@ -185,12 +185,12 @@ Page kind `PAGE_XFORM`: `[7][transform id][inner page blob]`; the decoder decode
 
 | file | level 7 | level 8 | zstd 1 |
 |---|---|---|---|
-| numeric.mem | 64.3% | 49.1% | 62.0% |
-| mixed.mem | 16.2% | 13.7% | 15.9% |
-| all five files | 28.6% | 25.7% | 27.7% |
+| numeric.mem | 64.3% | 51.5% | 62.0% |
+| mixed.mem | 16.2% | 14.0% | 15.9% |
+| all six files | 28.6% | 26.1% | 27.7% |
 
-Level 8 decodes at about 1,040 MB/s on the whole corpus (zstd 1: 924) and is smaller than zstd 1 and zstd 3 there.
-Honest reading: the gain comes from word-structured pages (numeric 15 points, mixed 2.5); text-like pages are unchanged
+Level 8 decodes at about 990 MB/s on the whole corpus (zstd 1: 912) and is smaller than zstd 1 there.
+Honest reading: the gain comes from word-structured pages (numeric 13 points, mixed 2); text-like pages are unchanged
 because the identity transform wins. The corpus is synthetic, so the size of the gain on real memory is unmeasured.
-Compression is slow (about 23 MB/s: it trials three transforms before the full pass), so level 8 suits pages that are
+Compression is about 60 MB/s: a cheap run-count screen picks one candidate transform and only that one gets a full pass (an earlier version trialled all three: 2.4 points smaller on numeric, 23 MB/s), so level 8 suits pages that are
 written rarely and read often. Tests cover round trips, all three transforms, corruption fuzzing and ASan/UBSan.
