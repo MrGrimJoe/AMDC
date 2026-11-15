@@ -230,3 +230,17 @@ Honest reading: the gain comes from word-structured pages (numeric 13 points, mi
 because the identity transform wins. The corpus is synthetic, so the size of the gain on real memory is unmeasured.
 Compression is about 70 MB/s: a cheap run-count screen picks one candidate transform and only that one gets a full pass (an earlier version trialled all three: 2.4 points smaller on numeric, 23 MB/s), so level 8 suits pages that are
 written rarely and read often. Tests cover round trips, all three transforms, corruption fuzzing and ASan/UBSan.
+
+## Level 1 on pages: faster compression (new)
+
+For inputs of 8 KiB or less (RAM pages) level 1 now uses a page-specialised compressor with the **same LZ4 output format
+and the same parse**: a 16-bit position table that is zeroed per call (instead of 32-bit epoch-tagged entries, which needed
+a stale-entry test and a distance test on every probe), four probes per loop iteration, and 16-byte wide copies for
+literals instead of a library `memcpy` call. Output size is unchanged (same parse). Measured with `cmpbench`-style
+interleaved runs on the synthetic corpus, one core: level 1 compress went from about 0.74x to about 1.04x the speed of
+`LZ4_compress_default` (LZ4 fast 1) at the same ratio. The shared VM varies by +-20% between runs, so the claim is
+"about at parity or slightly faster", not a large win. Decode is unchanged and still about 0.75x LZ4's decoder
+(it executes about 17-20% more instructions than LZ4's decoder on identical blobs).
+
+I also tried a word-dictionary page codec in the style of macOS's WKdm as a speed level. It compressed 1.4-2x faster than
+LZ4 on word-structured pages but decoded slower than LZ4 and gave a worse ratio, so it was dropped.

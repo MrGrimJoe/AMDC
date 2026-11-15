@@ -89,6 +89,7 @@ struct MatchTables {
     uint32_t tbl[1 << 16];
     int32_t head[1 << 16];
     int32_t chain[1 << 16];
+    uint16_t tbl16[1 << 12];
     uint32_t base = 1;
 };
 thread_local MatchTables g_mt;
@@ -142,6 +143,88 @@ size_t compress_level1(const uint8_t* src, size_t n, uint8_t* dst) {
         anchor = ip;
         if (ip >= mflimit) break;
         tbl[hash4(rd32(ip - 2), hlog)] = base + uint32_t(ip - 2 - src);
+    }
+done:
+    op += emit_last(op, anchor, size_t(src + n - anchor));
+    return size_t(op - dst);
+}
+
+// emit for the page compressor: literals are copied in 16-byte steps that may run up to 15 bytes past the literal run
+// (into output slack that block_bound() guarantees, and into source bytes that exist); falls back to memcpy near the end.
+inline void emit_page(uint8_t*& op, const uint8_t* lit, size_t litlen, size_t offset, size_t mlen, const uint8_t* srcend) {
+    uint8_t* token = op++;
+    const size_t ml = mlen - MIN_MATCH;
+    if (litlen >= 15) put_len(op, litlen - 15);
+    if (size_t(srcend - lit) >= litlen + 16) {
+        uint8_t* d = op;
+        const uint8_t* s = lit;
+        uint8_t* const e = op + litlen;
+        copy16(d, s);
+        while (litlen > 16 && (d += 16, s += 16, d < e)) copy16(d, s);
+    } else if (litlen) {
+        std::memcpy(op, lit, litlen);
+    }
+    op += litlen;
+    wr16(op, unsigned(offset));
+    op += 2;
+    if (ml >= 15) put_len(op, ml - 15);
+    *token = uint8_t(((litlen >= 15 ? 15 : litlen) << 4) | (ml >= 15 ? 15 : ml));
+}
+
+// Page-sized inputs (<= 8 KiB): 16-bit position table that is zeroed per call (8 KiB, a few dozen cycles) instead of
+// 32-bit epoch-tagged entries. No stale-entry test and no distance test are needed: every entry is a position inside this
+// input and below ip, so the match offset is always valid. Same LZ4 format and parse as compress_level1.
+size_t compress_level1_page(const uint8_t* src, size_t n, uint8_t* dst) {
+    uint8_t* op = dst;
+    if (n < MF_LIMIT + 1) return emit_last(dst, src, n);
+    constexpr int HL = 12;
+    uint16_t* const tbl = g_mt.tbl16;
+    std::memset(tbl, 0, sizeof(uint16_t) << HL);
+    const uint8_t* ip = src;
+    const uint8_t* anchor = src;
+    const uint8_t* const mflimit = src + n - MF_LIMIT;
+    const uint8_t* const matchlimit = src + n - LAST_LITERALS;
+    tbl[hash4(rd32(ip), HL)] = 0;
+    ++ip;
+    size_t nmiss = 0;                                  // probes since the last match: the step grows by one every 32
+    const uint8_t* p = ip;
+    for (;;) {
+        const uint8_t* ref;
+        for (;;) {
+            if (nmiss <= 28 && p + 4 < mflimit) {      // four probes at step 1 per iteration (same order as one at a time)
+#define LZ_PROBE(K)                                                         \
+                {                                                           \
+                    const uint32_t v = rd32(p + K);                         \
+                    const unsigned h = hash4(v, HL);                        \
+                    const uint8_t* const r = src + tbl[h];                  \
+                    tbl[h] = uint16_t(p + K - src);                         \
+                    if (rd32(r) == v) { ip = p + K; ref = r; goto found; }  \
+                }
+                LZ_PROBE(0) LZ_PROBE(1) LZ_PROBE(2) LZ_PROBE(3)
+#undef LZ_PROBE
+                p += 4;
+                nmiss += 4;
+                continue;
+            }
+            if (p >= mflimit) goto done;
+            const uint32_t v = rd32(p);
+            const unsigned h = hash4(v, HL);
+            const uint8_t* const r = src + tbl[h];
+            tbl[h] = uint16_t(p - src);
+            if (rd32(r) == v) { ip = p; ref = r; goto found; }
+            p += 1 + (nmiss >> 5);
+            ++nmiss;
+        }
+    found:
+        while (ip > anchor && ref > src && ip[-1] == ref[-1]) { --ip; --ref; }
+        size_t mlen = MIN_MATCH + count_match(ref + MIN_MATCH, ip + MIN_MATCH, matchlimit);
+        emit_page(op, anchor, size_t(ip - anchor), size_t(ip - ref), mlen, src + n);
+        ip += mlen;
+        anchor = ip;
+        if (ip >= mflimit) break;
+        tbl[hash4(rd32(ip - 2), HL)] = uint16_t(ip - 2 - src);
+        p = ip;
+        nmiss = 0;
     }
 done:
     op += emit_last(op, anchor, size_t(src + n - anchor));
@@ -206,7 +289,7 @@ size_t compress_level2(const uint8_t* src, size_t n, uint8_t* dst) {
 
 size_t block_compress(const uint8_t* src, size_t n, uint8_t* dst, int level) {
     if (n > (size_t(1) << 30)) throw FastError("block too large");  // positions are tagged into 31 bits
-    return level >= 2 ? compress_level2(src, n, dst) : compress_level1(src, n, dst);
+    return level >= 2 ? compress_level2(src, n, dst) : n <= 8192 ? compress_level1_page(src, n, dst) : compress_level1(src, n, dst);
 }
 
 // ---------------------------------------------------------------------------------------------------
