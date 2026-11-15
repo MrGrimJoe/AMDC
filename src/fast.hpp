@@ -40,13 +40,14 @@ size_t page3_compress(const uint8_t* page, size_t n, uint8_t* out, int level = 1
 bool page3_decompress(const uint8_t* enc, size_t len, uint8_t* page, size_t n);
 
 // ---- page codec (RAM compression building block) --------------------------------------------------
-enum PageKind : uint8_t { PAGE_RAW = 0, PAGE_ZERO = 1, PAGE_FILL = 2, PAGE_LZ = 3, PAGE_LZ2 = 4, PAGE_HUF = 5 };
+enum PageKind : uint8_t { PAGE_RAW = 0, PAGE_ZERO = 1, PAGE_FILL = 2, PAGE_LZ = 3, PAGE_LZ2 = 4, PAGE_HUF = 5, PAGE_SPLIT = 6 };
 
 inline size_t page_encode_bound(size_t page) { return block_bound(page) + 17; }
 
 // Levels: 1 and 2 write LZ4-format blobs (kind PAGE_LZ). Levels 3-7 (pages up to kPage2Max bytes; larger pages fall
 // back to levels 1/2) write the page v2/v3 formats: 3 = fast parse, 4 = chained parse, 5 = fast parse + Huffman
-// literals, 6 = chained parse + Huffman literals, 7 = chained parse + Huffman literals AND Huffman sequence bytes.
+// literals, 6 = chained parse + Huffman literals, 7 = chained parse, and the page is also split into separate literal,
+// token, offset and length streams that each get their own Huffman code (whichever of 6 and 7 is smaller is kept).
 // Level 5 is the best speed/size balance; level 7 is smallest (slowest to compress, ~30% slower to decode than 6).
 // Encodes one page into `out` (>= page_encode_bound(page) bytes). Returns the encoded size, or 0 when the
 // page is not worth compressing (encoded size would exceed page * max_pct / 100): keep it uncompressed.

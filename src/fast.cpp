@@ -209,7 +209,7 @@ size_t block_compress(const uint8_t* src, size_t n, uint8_t* dst, int level) {
 namespace {
 constexpr size_t P2_MAXOFF = 240 + 4095;
 }  // namespace
-namespace { template <bool V2, bool SEP> bool decode_impl(const uint8_t*, size_t, uint8_t*, size_t, const uint8_t*, const uint8_t*); }
+namespace { template <bool V2, int SEP> bool decode_impl(const uint8_t*, size_t, uint8_t*, size_t, const uint8_t*, const uint8_t*, const uint8_t*, const uint8_t*, const uint8_t*, const uint8_t*); }
 namespace {
 
 inline unsigned p2_offcost(size_t off, size_t last) { return (off == last || off < 240) ? 1u : 2u; }
@@ -551,11 +551,10 @@ static bool huf_dec_block(const uint8_t*& ipr, const uint8_t* iend, size_t n, ui
 }
 
 constexpr size_t kSeqMax = kPage2Max * 2 + 64;     // upper bound on the literal-free sequence bytes of one page
+constexpr size_t kPartMax = kPage2Max / 2 + 64;    // bound for the token / offset / extension streams of one page
 
-// Page v3 payload: flags | u16 nlit | literals (raw, or Huffman block if flags&1) | u16 nseq | sequences (raw, or
-// Huffman block if flags&2). The two blocks are independent, so each is coded only when that is smaller.
-// code_seq = false leaves the sequence bytes raw (cheaper to decode, bigger for compressible pages).
-size_t page3_huf(const uint8_t* lz2, size_t lzlen, uint8_t* out, bool code_seq) {
+// Page v3 payload: flags | u16 nlit | literals (raw, or Huffman block if flags&1) | u16 nseq | sequence bytes (raw).
+size_t page3_huf(const uint8_t* lz2, size_t lzlen, uint8_t* out) {
     uint8_t lits[kPage2Max + 32];
     uint8_t seq[kSeqMax];
     size_t nlit = 0, ns = 0;
@@ -575,16 +574,15 @@ size_t page3_huf(const uint8_t* lz2, size_t lzlen, uint8_t* out, bool code_seq) 
         if ((t & 15) == 15) { uint8_t b; do { b = *ip++; seq[ns++] = b; } while (b == 255); }
     }
     uint8_t tl[kPage2Max * 2 + 600];
-    uint8_t ts[kSeqMax * 2 + 600];
-    size_t cl = nlit >= 32 ? huf_enc_block(lits, nlit, tl) : 0;
-    size_t cs = (code_seq && ns >= 32) ? huf_enc_block(seq, ns, ts) : 0;
-    const bool lc = cl && cl < nlit, sc = cs && cs < ns;
+    const size_t cl = nlit >= 32 ? huf_enc_block(lits, nlit, tl) : 0;
+    const bool lc = cl && cl < nlit;
     uint8_t* op = out;
-    *op++ = uint8_t((lc ? 1 : 0) | (sc ? 2 : 0));
+    *op++ = uint8_t(lc ? 1 : 0);
     wr16(op, unsigned(nlit)); op += 2;
     if (lc) { std::memcpy(op, tl, cl); op += cl; } else { std::memcpy(op, lits, nlit); op += nlit; }
     wr16(op, unsigned(ns)); op += 2;
-    if (sc) { std::memcpy(op, ts, cs); op += cs; } else { std::memcpy(op, seq, ns); op += ns; }
+    std::memcpy(op, seq, ns);
+    op += ns;
     return size_t(op - out);
 }
 
@@ -592,7 +590,7 @@ bool page3_unhuf(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen) {
     const uint8_t* const iend = ip + inlen;
     if (inlen < 5) return false;
     const unsigned flags = *ip++;
-    if (flags > 3) return false;
+    if (flags > 1) return false;
     uint8_t lit[kPage2Max + 32];
     const size_t nlit = rd16(ip);
     ip += 2;
@@ -608,18 +606,80 @@ bool page3_unhuf(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen) {
     if (iend - ip < 2) return false;
     const size_t ns = rd16(ip);
     ip += 2;
-    if (ns > kSeqMax) return false;
-    uint8_t seqbuf[kSeqMax + 32];
-    const uint8_t* seq;
-    if (flags & 2) {
-        if (ns == 0 || !huf_dec_block(ip, iend, ns, seqbuf) || ip != iend) return false;
-        std::memset(seqbuf + ns, 0, 32);
-        seq = seqbuf;
-    } else {
-        if (ns != size_t(iend - ip)) return false;
-        seq = ip;
+    if (ns != size_t(iend - ip)) return false;
+    return decode_impl<true, 1>(ip, ns, dst, outlen, lit, lit + nlit, nullptr, nullptr, nullptr, nullptr);
+}
+
+// Page v3 "split" payload: flags | four parts, each u16 n + (raw bytes, or a Huffman block when its flag bit is set):
+//   literals (bit 0), token bytes (bit 1), offset bytes (bit 2), length-extension bytes (bit 3).
+// Separate codes fit each stream's own statistics, which one shared code over all sequence bytes cannot.
+size_t page3_split(const uint8_t* lz2, size_t lzlen, uint8_t* out) {
+    uint8_t lits[kPage2Max + 32];
+    uint8_t tok[kPartMax], off[kPartMax], ext[kPartMax];
+    size_t nl = 0, nt = 0, no = 0, ne = 0;
+    const uint8_t* ip = lz2;
+    const uint8_t* const e = lz2 + lzlen;
+    for (;;) {
+        const uint8_t t = *ip++;
+        tok[nt++] = t;
+        size_t lit = t >> 4;
+        if (lit == 15) { uint8_t b; do { b = *ip++; ext[ne++] = b; lit += b; } while (b == 255); }
+        std::memcpy(lits + nl, ip, lit);
+        nl += lit; ip += lit;
+        if (ip >= e) break;
+        const uint8_t o = *ip++;
+        off[no++] = o;
+        if (o >= 0xF0) off[no++] = *ip++;
+        if ((t & 15) == 15) { uint8_t b; do { b = *ip++; ext[ne++] = b; } while (b == 255); }
     }
-    return decode_impl<true, true>(seq, ns, dst, outlen, lit, lit + nlit);
+    struct Part { const uint8_t* d; size_t n; size_t c; uint8_t* tmp; };
+    uint8_t tl[kPage2Max * 2 + 600], tt[kPartMax * 2 + 600], to[kPartMax * 2 + 600], te[kPartMax * 2 + 600];
+    Part parts[4] = {{lits, nl, 0, tl}, {tok, nt, 0, tt}, {off, no, 0, to}, {ext, ne, 0, te}};
+    unsigned flags = 0;
+    uint8_t* op = out + 1;
+    for (int k = 0; k < 4; ++k) {
+        Part& pt = parts[k];
+        pt.c = pt.n >= 16 ? huf_enc_block(pt.d, pt.n, pt.tmp) : 0;
+        const bool coded = pt.c && pt.c < pt.n;
+        wr16(op, unsigned(pt.n)); op += 2;
+        if (coded) { flags |= 1u << k; std::memcpy(op, pt.tmp, pt.c); op += pt.c; }
+        else { std::memcpy(op, pt.d, pt.n); op += pt.n; }
+    }
+    out[0] = uint8_t(flags);
+    return size_t(op - out);
+}
+
+bool page3_unsplit(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen) {
+    const uint8_t* const iend = ip + inlen;
+    if (inlen < 9) return false;
+    const unsigned flags = *ip++;
+    if (flags > 15) return false;
+    uint8_t lit[kPage2Max + 32];
+    uint8_t bt[kPartMax], bo[kPartMax], be[kPartMax];
+    const uint8_t* ptr[3] = {nullptr, nullptr, nullptr};
+    size_t cnt[3] = {0, 0, 0};
+    uint8_t* const dec[3] = {bt, bo, be};
+    size_t nl = 0;
+    for (int k = 0; k < 4; ++k) {
+        if (iend - ip < 2) return false;
+        const size_t n = rd16(ip);
+        ip += 2;
+        if (n > (k == 0 ? kPage2Max : kPartMax) || (k == 0 && n > outlen)) return false;
+        uint8_t* const dest = k == 0 ? lit : dec[k - 1];
+        const uint8_t* src;
+        if (flags >> k & 1) {
+            if (n == 0 || !huf_dec_block(ip, iend, n, dest)) return false;
+            src = dest;
+        } else {
+            if (n > size_t(iend - ip)) return false;
+            if (k == 0) { std::memcpy(lit, ip, n); src = lit; } else src = ip;
+            ip += n;
+        }
+        if (k == 0) nl = n; else { ptr[k - 1] = src; cnt[k - 1] = n; }
+    }
+    if (ip != iend) return false;
+    std::memset(lit + nl, 0, 32);
+    return decode_impl<true, 2>(ptr[0], cnt[0], dst, outlen, lit, lit + nl, ptr[1], ptr[1] + cnt[1], ptr[2], ptr[2] + cnt[2]);
 }
 
 size_t page2_compress(const uint8_t* src, size_t n, uint8_t* dst, int level) {
@@ -628,7 +688,7 @@ size_t page2_compress(const uint8_t* src, size_t n, uint8_t* dst, int level) {
 }
 
 bool page2_decompress(const uint8_t* src, size_t n, uint8_t* dst, size_t out_len) {
-    return decode_impl<true, false>(src, n, dst, out_len, nullptr, nullptr);
+    return decode_impl<true, 0>(src, n, dst, out_len, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 static bool all_same_bytes(const uint8_t* p, size_t n) {
@@ -650,9 +710,11 @@ size_t page3_compress(const uint8_t* page, size_t n, uint8_t* out, int level) {
     size_t best = c + 1;
     out[0] = PAGE_LZ2;
     if (level >= 3 && c > 128) {
-        uint8_t tmp[kPage2Max * 2 + 512];
-        const size_t h = page3_huf(out + 1, c, tmp + 1, level >= 5);
-        if (h && h + 1 < best) { std::memcpy(out + 1, tmp + 1, h); out[0] = PAGE_HUF; best = h + 1; }
+        uint8_t tmp[kPage2Max * 2 + 512], tmp2[kPage2Max * 2 + 512];
+        const size_t h = page3_huf(out + 1, c, tmp + 1);
+        const size_t sp = level >= 5 ? page3_split(out + 1, c, tmp2 + 1) : 0;   // reads out + 1 before it is overwritten
+        if (sp && sp + 1 < best && (!h || sp < h)) { std::memcpy(out + 1, tmp2 + 1, sp); out[0] = PAGE_SPLIT; best = sp + 1; }
+        else if (h && h + 1 < best) { std::memcpy(out + 1, tmp + 1, h); out[0] = PAGE_HUF; best = h + 1; }
     }
     return best < n ? best : 0;
 }
@@ -662,8 +724,9 @@ bool page3_decompress(const uint8_t* enc, size_t len, uint8_t* page, size_t n) {
     switch (enc[0]) {
         case PAGE_ZERO: if (len != 1) return false; std::memset(page, 0, n); return true;
         case PAGE_FILL: if (len != 2) return false; std::memset(page, enc[1], n); return true;
-        case PAGE_LZ2: return n <= kPage2Max && decode_impl<true, false>(enc + 1, len - 1, page, n, nullptr, nullptr);
+        case PAGE_LZ2: return n <= kPage2Max && decode_impl<true, 0>(enc + 1, len - 1, page, n, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
         case PAGE_HUF: return n <= kPage2Max && page3_unhuf(enc + 1, len - 1, page, n);
+        case PAGE_SPLIT: return n <= kPage2Max && page3_unsplit(enc + 1, len - 1, page, n);
         default: return false;
     }
 }
@@ -733,8 +796,15 @@ static inline bool copy_match(uint8_t*& op, uint8_t* const oend, size_t offset, 
 
 // SEP: literals come from a separate, already decoded buffer [lp, lend) that is padded by >= 16 readable
 // bytes, instead of from the token stream (used by the Huffman-literal page format).
-template <bool V2, bool SEP>
-bool decode_impl(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen, const uint8_t* lp, const uint8_t* lend) {
+template <bool V2, int SEP>
+bool decode_impl(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen, const uint8_t* lp, const uint8_t* lend,
+                 const uint8_t* ap, const uint8_t* aend, const uint8_t* ep, const uint8_t* eend) {
+    constexpr bool SL = SEP >= 1;      // literals come from [lp, lend)
+    constexpr bool S3 = SEP == 2;      // offsets from [ap, aend), length extensions from [ep, eend), tokens from ip
+    const uint8_t*& A = S3 ? ap : ip;
+    const uint8_t* const Aend = S3 ? aend : ip + inlen;
+    const uint8_t*& E = S3 ? ep : ip;
+    const uint8_t* const Eend = S3 ? eend : ip + inlen;
     const uint8_t* const iend = ip + inlen;
     uint8_t* op = dst;
     uint8_t* const oend = dst + outlen;
@@ -748,8 +818,8 @@ bool decode_impl(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen, c
         // with 32 spare input bytes and 64 spare output bytes every copy below is a fixed-size wide copy that
         // cannot leave either buffer, so none of the per-byte bounds checks are needed. Anything else (long
         // lengths, buffer ends, offsets < 8) takes the fully checked path that follows.
-        if (lit < 15 && iend - ip >= 32 && oend - op >= 64) {
-            if (SEP) {
+        if (lit < 15 && (S3 ? aend - ap >= 2 : iend - ip >= (SL ? 4 : 32)) && oend - op >= 64) {
+            if (SL) {
                 if (lit > size_t(lend - lp)) return false;
                 copy16(op, lp);
                 lp += lit;
@@ -761,12 +831,12 @@ bool decode_impl(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen, c
             size_t offset;
             if (V2) {
                 // branch-free: both candidate readings are computed, then one is selected
-                const unsigned o = ip[0], o2 = ip[1];
+                const unsigned o = A[0], o2 = A[1];
                 const size_t big = ((size_t(o & 15) << 8) | o2) + 240;
                 const size_t small = o ? size_t(o) : last;
                 const bool two = o >= 0xF0;
                 offset = two ? big : small;
-                ip += 1 + size_t(two);
+                A += 1 + size_t(two);
                 last = offset;
             } else {
                 offset = rd16(ip);
@@ -778,8 +848,8 @@ bool decode_impl(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen, c
             if ((token & 15) == 15) {
                 unsigned x;
                 do {
-                    if (ip >= iend) return false;
-                    x = *ip++;
+                    if (E >= Eend) return false;
+                    x = *E++;
                     mlen += x;
                     if (mlen > outlen) return false;
                 } while (x == 255);
@@ -820,16 +890,16 @@ bool decode_impl(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen, c
         if (lit == 15) {
             unsigned s;
             do {
-                if (ip >= iend) return false;
-                s = *ip++;
+                if (E >= Eend) return false;
+                s = *E++;
                 lit += s;
                 if (lit > outlen) return false;
             } while (s == 255);
         }
-        const uint8_t*& L = SEP ? lp : ip;
-        const uint8_t* const Lend = SEP ? lend : iend;
+        const uint8_t*& L = SL ? lp : ip;
+        const uint8_t* const Lend = SL ? lend : iend;
         if (lit > size_t(Lend - L) || lit > size_t(oend - op)) return false;
-        if (size_t(oend - op) >= lit + 16 && (SEP || size_t(iend - ip) >= lit + 16)) {
+        if (size_t(oend - op) >= lit + 16 && (SL || size_t(iend - ip) >= lit + 16)) {
             const uint8_t* s = L;
             uint8_t* d = op;
             uint8_t* const e = op + lit;
@@ -839,30 +909,30 @@ bool decode_impl(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen, c
         }
         L += lit;
         op += lit;
-        if (ip == iend) return op == oend && (!SEP || lp == lend);
+        if (ip == iend) return op == oend && (!SL || lp == lend) && (!S3 || (ap == aend && ep == eend));
         size_t offset;
         if (V2) {
-            if (iend - ip < 1) return false;
-            const unsigned o = *ip++;
+            if (Aend - A < 1) return false;
+            const unsigned o = *A++;
             if (o == 0) offset = last;
             else if (o <= 0xEF) offset = o;
             else {
-                if (ip >= iend) return false;
-                offset = ((size_t(o & 15) << 8) | *ip++) + 240;
+                if (A >= Aend) return false;
+                offset = ((size_t(o & 15) << 8) | *A++) + 240;
             }
             last = offset;
         } else {
-            if (iend - ip < 2) return false;
-            offset = rd16(ip);
-            ip += 2;
+            if (Aend - A < 2) return false;
+            offset = rd16(A);
+            A += 2;
         }
         if (offset == 0 || offset > size_t(op - dst)) return false;
         size_t mlen = token & 15;
         if (mlen == 15) {
             unsigned s;
             do {
-                if (ip >= iend) return false;
-                s = *ip++;
+                if (E >= Eend) return false;
+                s = *E++;
                 mlen += s;
                 if (mlen > outlen) return false;
             } while (s == 255);
@@ -874,7 +944,7 @@ bool decode_impl(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen, c
 }  // namespace
 
 bool block_decompress(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen) {
-    return decode_impl<false, false>(ip, inlen, dst, outlen, nullptr, nullptr);
+    return decode_impl<false, 0>(ip, inlen, dst, outlen, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -934,6 +1004,7 @@ bool page_decompress(const uint8_t* enc, size_t len, uint8_t* page, size_t n) {
             return block_decompress(enc + 1, len - 1, page, n);
         case PAGE_LZ2:
         case PAGE_HUF:
+        case PAGE_SPLIT:
             return page3_decompress(enc, len, page, n);
         default:
             return false;

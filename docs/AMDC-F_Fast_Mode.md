@@ -96,11 +96,13 @@ The LZ4 block format spends two bytes on every offset and cannot entropy-code an
 | 4 | level 3 with a chained, cost-aware parse |
 | 5 | level 3 + Huffman-coded literals (canonical code, max length 10, four interleaved bit streams), only when smaller |
 | 6 | level 4 + Huffman-coded literals |
-| 7 | level 4 + Huffman-coded literals **and** Huffman-coded sequence bytes (tokens, offsets, lengths) |
+| 7 | level 4, with the page split into four streams (literals, tokens, offsets, length extensions) that each get their own Huffman code when that is smaller |
 
 Each Huffman block is used only when it makes that part smaller, so a page never grows because of it. The sequence bytes
-are a large share of a compressed page (33-38% on the compressible heap data here, 6-9% on text and binaries), which is
-why level 7 gains about 2 points over level 6.
+(tokens, offsets, lengths) are a large share of a compressed page (33-38% on the compressible heap data here, 6-9% on
+text and binaries), which is why level 7 gains about 2.4 points over level 6. Splitting them into one stream per kind
+(rather than one shared code) was worth only a further 0.24 points for about 10% of decode speed: each extra stream pays
+for its own code table, which is a lot on pages that compress to a few hundred bytes.
 
 Per-page results, 4 KiB pages compressed independently, single core, every page decoded and compared. Corpus: 383 MB of
 heap images generated here (Python object graphs, text, numeric arrays, a mixed heap with zero and random pages) plus
@@ -116,7 +118,7 @@ The shared VM varies by about +-30% between runs, so compare rows within one run
 | **amdcf level 4** | 34.4% | 137 | 2858 |
 | **amdcf level 5** | 33.5% | 255 | 1256 |
 | **amdcf level 6** | 31.0% | 103 | 1378 |
-| **amdcf level 7** | 28.8% | 89 | 967 |
+| **amdcf level 7** | 28.6% | 71 | 871 |
 | lz4 (fast 1) | 41.3% | 900 | 4323 |
 | lz4hc-3 | 37.7% | 208 | 5067 |
 | zstd 1 | 27.7% | 387 | 940 |
@@ -127,11 +129,12 @@ Honest reading:
 
 * Against **LZ4-class RAM compressors** (what zram uses by default): levels 3/4 are 4-7 points smaller than LZ4 at similar
   compress speed, but **LZ4's decoder is still faster** (about 1.3x faster than level 1, 1.5-1.8x faster than levels 3/4).
-* Against **zstd**: level 7 decodes at about the same speed as zstd 1 but is **about 1.1 points larger**, and it compresses
-  about 4x slower. Levels 5/6 decode about 1.3-1.45x faster than zstd 1 but are 6 and 3 points larger. zstd still wins on size.
+* Against **zstd**: level 7 is **about 0.9 points larger and about 7% slower to decode** than zstd 1, and it compresses
+  about 5x slower, so zstd 1 is the better codec at that size. Per file, level 7 is within 0.3-0.5 points of zstd 1 on
+  the mixed heap and text, 0.9-1.0 on Python objects and binaries, and 2.3 behind on numeric arrays. Levels 5/6 decode about 1.3-1.45x faster than zstd 1 but are 6 and 3 points larger. zstd still wins on size.
 * Against **Windows' compressor (Xpress-Huffman)**: it is not available outside Windows, so it was **not measured**. zlib-1 is
-  the same family (LZ77 + Huffman) and a similar size class, so it is used as a rough proxy only. Level 7 is about
-  the same size as zlib-1 and decodes about 2.2x faster; level 6 is 2 points larger and decodes 3.1x faster. Do not read
+  the same family (LZ77 + Huffman) and a similar size class, so it is used as a rough proxy only. Level 7 is slightly
+  smaller than zlib-1 and decodes about 2x faster; level 6 is 2 points larger and decodes 3.1x faster. Do not read
   this as a measured win over Windows; run it on the target machine.
 * **lzo-rle**, zram's other common default, was not built or measured here.
 * Compression of the higher levels is slow (level 7 about 90 MB/s): they suit pages that are written rarely and read often.
@@ -140,12 +143,12 @@ Honest reading:
 
 Multi-core: pages are independent, so both compression and decompression scale with cores (`bench_pages -t N`), as they
 do for LZ4 and zstd when those are used per page. On a 2-core VM, 2 threads gave about 1.8-1.9x. Decode in GB/s at 2
-threads: level 1 5.7, level 3 4.5, level 5 2.4, level 6 2.6, level 7 1.8, against LZ4 8.3 and zstd 1 1.7. Only 2 threads
+threads: level 1 5.9, level 3 4.5, level 5 2.3, level 6 2.6, level 7 1.6, against LZ4 8.1 and zstd 1 1.8. Only 2 threads
 were measured; larger counts are not claimed.
 
 Reproduce: `LZ4=/path/to/lz4/lib ZSTD=/path/to/zstd/lib bench/bench_pages.sh [-t THREADS] FILE...` (lz4/zstd optional).
 
-Tests: round trips over 12 page shapes x 10 sizes x 5 levels, a naive reference decoder compared against the fast decoder,
+Tests: round trips over 12 page shapes x 10 sizes x 5 page levels, a naive reference decoder compared against the fast decoder,
 73,000 randomly corrupted blobs checked for guard-byte integrity, all under ASan + UBSan in `make sanitize`.
 
 ## What this does NOT do: "optimizing Windows by compressing its RAM"
