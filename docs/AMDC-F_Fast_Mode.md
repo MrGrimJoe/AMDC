@@ -351,5 +351,6 @@ archives through an ASan/UBSan build (no crashes). Windows file associations (do
 
 `.github/workflows/ci.yml` runs on every push to `main` and on pull requests. Linux: builds the fast-mode tools, unit tests,
 `amdcread` end-to-end test, the Python reference-decoder interop check, ASan/UBSan, ThreadSanitizer and a 90-second fuzz run.
-Windows: CMake/MSVC build and the fast-mode tests. I ran every Linux step's commands locally and they pass; the workflow
-itself has not run on GitHub yet and the Windows job is untested.
+Windows (`windows-latest`, MSVC): builds every target, runs the fast-codec, solid-archive and C-interface tests, then a smoke test
+that compresses a file with `amdcf.exe` and `amdc1.exe`, reads it back with `amdcread.exe` (scan, test, cat) and compares file hashes.
+Both jobs passed on GitHub Actions (run 43840923207). Only x64 Windows is covered; ARM64 and older MSVC versions are not.
