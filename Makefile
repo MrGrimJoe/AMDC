@@ -76,6 +76,21 @@ sanitize: | build
 	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -pthread $(BWT_SRC) tests/test_bwt.cpp -o build/test_bwt_san
 	./build/test_bwt_san
 
+# Same as `sanitize` but only the fast codec + C interface (what CI runs; the full target also builds the slow codecs)
+sanitize-fast: | build
+	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -pthread $(FAST_SRC) tests/test_fast.cpp -o build/test_fast_san
+	./build/test_fast_san
+	$(CC) -std=c11 -Wall -Wextra -c tests/test_capi.c -o build/test_capi_san.o
+	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -pthread $(CAPI_SRC) build/test_capi_san.o -o build/test_capi_san
+	./build/test_capi_san
+
+# Random + mutated inputs through the page/block decoders and a compress/decompress round trip, under ASan/UBSan.
+# (tests/fuzz_pages.cpp is also a libFuzzer target: clang++ -fsanitize=fuzzer,address,undefined ...)
+FUZZ_SECONDS ?= 30
+fuzz: | build
+	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -pthread $(FAST_SRC) tests/fuzz_pages.cpp tests/fuzz_driver.cpp -o build/fuzz_driver
+	./build/fuzz_driver $(FUZZ_SECONDS)
+
 # Data-race check of the page cache (concurrent put/get/erase test)
 tsan: | build
 	$(CXX) -std=c++17 -O1 -g -fsanitize=thread -pthread $(FAST_SRC) tests/test_fast.cpp -o build/test_fast_tsan

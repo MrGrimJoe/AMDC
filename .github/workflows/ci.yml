@@ -1,0 +1,35 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build fast-mode tools and tests
+        run: make build/amdcf build/test_fast build/test_capi build/test_solid build/bench_pool
+      - name: Unit tests
+        run: |
+          ./build/test_fast
+          ./build/test_capi
+          ./build/test_solid
+      - name: Interop with the pure-Python reference decoder
+        run: make crosscheck-fast
+      - name: ASan + UBSan (fast codec incl. decoder mutation tests, C interface)
+        run: make sanitize-fast
+      - name: ThreadSanitizer (page cache + PagePool)
+        run: make tsan
+      - name: Fuzz the decoders and encoders for 90 s
+        run: make fuzz FUZZ_SECONDS=90
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure and build (MSVC)
+        run: cmake -B build && cmake --build build --config Release --target test_fast amdcf
+      - name: Run fast-mode tests
+        run: ctest --test-dir build -C Release -R fast --output-on-failure
