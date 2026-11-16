@@ -1089,8 +1089,28 @@ namespace {
 // V2 = page format: offset byte 0 = repeat the previous offset, 1..0xEF = that offset, 0xF0..0xFF + byte =
 // 240 + 12-bit value (covers every offset inside a page of up to 4336 bytes). Everything else matches LZ4.
 // Fully checked match copy for any offset / length / output slack. Requires 1 <= offset <= op - dst.
-static inline bool copy_match(uint8_t*& op, uint8_t* const oend, size_t offset, size_t mlen) {
-    if (mlen > size_t(oend - op)) return false;
+// First 16 bytes of a match with period 2..15 (needs >= 16 bytes of output). Offsets >= 8 are two 8-byte copies (the second
+// reads what the first wrote). Periods 2..7: 4 bytes by hand, 4 more from a period-aligned source, then 8 from a source
+// whose distance to the destination is a multiple of the period and >= 8 (the classic LZ4 inc/dec tables).
+static inline void period_head16(uint8_t* op, const uint8_t* m, size_t offset) {
+    if (offset >= 8) {
+        copy8(op, m);
+        copy8(op + 8, m + 8);
+    } else {
+        static const int8_t inc32[8] = {0, 1, 2, 1, 0, 4, 4, 4};
+        static const int8_t dec64[8] = {0, 0, 0, -1, -4, 1, 2, 3};
+        op[0] = m[0]; op[1] = m[1]; op[2] = m[2]; op[3] = m[3];
+        m += inc32[offset];
+        std::memcpy(op + 4, m, 4);
+        m -= dec64[offset];
+        copy8(op + 8, m);
+    }
+}
+
+// Returns the new output pointer, or nullptr when the match does not fit. Passed and returned by value on purpose: a
+// by-reference `op` is forced into memory in the decoder's hot loop and costs a store-to-load round trip per sequence.
+static inline uint8_t* copy_match(uint8_t* op, uint8_t* const oend, size_t offset, size_t mlen) {
+    if (mlen > size_t(oend - op)) return nullptr;
     const uint8_t* m = op - offset;
     const size_t room = size_t(oend - op);
     if (offset >= 16) {
@@ -1117,8 +1137,8 @@ static inline bool copy_match(uint8_t*& op, uint8_t* const oend, size_t offset, 
         expand_period(op, m, offset, mlen);
     } else if (room >= mlen + 16) {
         // short period: write 16 bytes by hand, then continue from a multiple of the period >= 16
-        size_t pre = mlen < 16 ? mlen : 16;
-        for (size_t i = 0; i < pre; ++i) op[i] = m[i];
+        if (mlen >= 16) period_head16(op, m, offset);
+        else for (size_t i = 0; i < mlen; ++i) op[i] = m[i];
         if (mlen > 16) {
             const size_t off2 = offset * ((16 + offset - 1) / offset);
             uint8_t* d = op + 16;
@@ -1129,8 +1149,7 @@ static inline bool copy_match(uint8_t*& op, uint8_t* const oend, size_t offset, 
     } else {
         for (size_t i = 0; i < mlen; ++i) op[i] = m[i];
     }
-    op += mlen;
-    return true;
+    return op + mlen;
 }
 
 // SEP: literals come from a separate, already decoded buffer [lp, lend) that is padded by >= 16 readable
@@ -1142,21 +1161,48 @@ bool decode_impl(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen, c
     uint8_t* const oend = dst + outlen;
     size_t last = 0;
     (void)last;
+    // limits for the fast path as plain integers (0 = never taken): >= 33 input bytes and >= 64 output bytes left
+    const uintptr_t ip_lim = inlen >= 33 ? uintptr_t(iend) - 33 : 0, op_lim = outlen >= 64 ? uintptr_t(oend) - 64 : 0;
     for (;;) {
-        if (ip >= iend) return false;
-        const unsigned token = *ip++;
-        size_t lit = token >> 4;
+        unsigned token;
+        size_t lit;
+        bool fast = false;
+        if (uintptr_t(ip) <= ip_lim && uintptr_t(op) <= op_lim) {   // a limit of 0 can never be met
+            token = *ip++;
+            lit = token >> 4;
+            fast = lit < 15;
+            if (lit == 15) {   // one length-extension byte (literal runs of 15..269): still no per-byte checks if there is room
+                const size_t lit2 = 15 + size_t(*ip);
+                if (*ip != 255 && size_t(iend - ip) >= lit2 + 33 && size_t(oend - op) >= lit2 + 64) { ++ip; lit = lit2; fast = true; }
+            }
+        } else {
+            if (ip >= iend) return false;
+            token = *ip++;
+            lit = token >> 4;
+        }
         // Fast path for the overwhelmingly common sequence (literal run < 15, match length field < 15):
         // with 32 spare input bytes and 64 spare output bytes every copy below is a fixed-size wide copy that
         // cannot leave either buffer, so none of the per-byte bounds checks are needed. Anything else (long
-        // lengths, buffer ends, offsets < 8) takes the fully checked path that follows.
-        if (lit < 15 && iend - ip >= 32 && oend - op >= 64) {
+        // lengths, buffer ends) takes the fully checked path that follows.
+        if (fast) {
             if (SEP) {
                 if (lit > size_t(lend - lp)) return false;
                 copy16(op, lp);
+                if (lit > 16) {
+                    uint8_t* d = op + 16;
+                    const uint8_t* sp = lp + 16;
+                    uint8_t* const e = op + lit;
+                    do { copy16(d, sp); d += 16; sp += 16; } while (d < e);
+                }
                 lp += lit;
             } else {
                 copy16(op, ip);
+                if (lit > 16) {
+                    uint8_t* d = op + 16;
+                    const uint8_t* sp = ip + 16;
+                    uint8_t* const e = op + lit;
+                    do { copy16(d, sp); d += 16; sp += 16; } while (d < e);
+                }
                 ip += lit;
             }
             op += lit;
@@ -1174,7 +1220,7 @@ bool decode_impl(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen, c
                 offset = rd16(ip);
                 ip += 2;
             }
-            if (offset == 0 || offset > size_t(op - dst)) return false;
+            if (offset - 1 >= size_t(op - dst)) return false;   // offset 0 wraps to a huge value: one compare for both
             size_t mlen = (token & 15) + MIN_MATCH;            // 4..18, or longer after the extension below
             const uint8_t* m = op - offset;
             if ((token & 15) == 15) {
@@ -1190,7 +1236,7 @@ bool decode_impl(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen, c
                     uint8_t* const e = op + mlen;
                     do { copy16(d, m); d += 16; m += 16; } while (d < e);
                     op = e;
-                } else if (!copy_match(op, oend, offset, mlen)) {
+                } else if (!(op = copy_match(op, oend, offset, mlen))) {
                     return false;
                 }
                 continue;
@@ -1210,14 +1256,24 @@ bool decode_impl(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen, c
                 op += mlen;
                 continue;
             }
-            if (offset == 1) {
-                std::memset(op, m[0], mlen);
+            if (offset == 1) {                      // byte run: three 8-byte stores (mlen <= 18, 64 bytes of slack)
+                const uint64_t v = uint64_t(m[0]) * 0x0101010101010101ull;
+                std::memcpy(op, &v, 8); std::memcpy(op + 8, &v, 8); std::memcpy(op + 16, &v, 8);
                 op += mlen;
                 continue;
             }
-            for (size_t i = 0; i < mlen; ++i) op[i] = m[i];
-            op += mlen;
-            continue;
+            {   // period 2..7: 4 + 4 bytes by table, then 8-byte steps from a period-aligned source (24 bytes written)
+                static const int8_t inc32[8] = {0, 1, 2, 1, 0, 4, 4, 4};
+                static const int8_t dec64[8] = {0, 0, 0, -1, -4, 1, 2, 3};
+                op[0] = m[0]; op[1] = m[1]; op[2] = m[2]; op[3] = m[3];
+                m += inc32[offset];
+                std::memcpy(op + 4, m, 4);
+                m -= dec64[offset];
+                copy8(op + 8, m);
+                copy8(op + 16, m + 8);
+                op += mlen;
+                continue;
+            }
         }
         if (lit == 15) {
             unsigned s;
@@ -1270,7 +1326,7 @@ bool decode_impl(const uint8_t* ip, size_t inlen, uint8_t* dst, size_t outlen, c
             } while (s == 255);
         }
         mlen += MIN_MATCH;
-        if (!copy_match(op, oend, offset, mlen)) return false;
+        if (!(op = copy_match(op, oend, offset, mlen))) return false;
     }
 }
 // Page format v4 decoder: same sequence semantics as decode_impl<true, true>, but tokens, offset bytes and length
@@ -1315,7 +1371,7 @@ bool decode_split(const uint8_t* tp, const uint8_t* const tend, const uint8_t* o
                     uint8_t* const e = op + mlen;
                     do { copy16(d, m); d += 16; m += 16; } while (d < e);
                     op = e;
-                } else if (!copy_match(op, oend, offset, mlen)) {
+                } else if (!(op = copy_match(op, oend, offset, mlen))) {
                     return false;
                 }
                 continue;
@@ -1361,7 +1417,7 @@ bool decode_split(const uint8_t* tp, const uint8_t* const tend, const uint8_t* o
             } while (x == 255);
         }
         mlen += MIN_MATCH;
-        if (!copy_match(op, oend, offset, mlen)) return false;
+        if (!(op = copy_match(op, oend, offset, mlen))) return false;
     }
 }
 }  // namespace

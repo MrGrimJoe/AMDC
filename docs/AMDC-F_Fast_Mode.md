@@ -277,3 +277,14 @@ There is no GPU path: LZ-family decoding is serial per page and a 4 KiB page is 
 Tests: the pool is compared byte-for-byte with sequential `page_compress` for levels 1, 2, 3, 5, 8 and thread counts 1, 2, 3, 8,
 failure counting is checked with deliberately corrupted blobs, and four threads share one pool concurrently under
 ASan/UBSan and ThreadSanitizer. The C header is compiled as C11 and round-tripped in `tests/test_capi.c`.
+
+## Decoder: what was slow and what changed (new)
+
+Profiling the decoder against LZ4's on identical blobs showed ours spent more instructions per sequence and, worse,
+kept the output pointer in memory (a helper took it by reference, so the compiler stored and reloaded it on every
+sequence). Changes: the match-copy helper now takes and returns the pointer by value; the fast-path guards are plain
+integer compares against precomputed limits; a literal run of 15-269 bytes stays on the fast path; short-period matches
+use table-driven 8-byte copies instead of byte loops. Interleaved A/B on the same machine (same blobs, same run window):
+level 1 decode +8%, level 2 +5%, level 3 +8%, Huffman levels unchanged. Against LZ4's decoder on identical LZ4-format blobs
+the ratio went from about 0.73x to about 0.82x. **LZ4's decoder is still ~20% faster**; this is not parity.
+All tests (ASan/UBSan, the differential decoder, LZ4 interop) pass.
