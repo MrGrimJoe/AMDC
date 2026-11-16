@@ -16,6 +16,8 @@ jobs:
           ./build/test_fast
           ./build/test_capi
           ./build/test_solid
+      - name: amdcread end-to-end (all four formats, damaged input)
+        run: make test-reader
       - name: Interop with the pure-Python reference decoder
         run: make crosscheck-fast
       - name: ASan + UBSan (fast codec incl. decoder mutation tests, C interface)

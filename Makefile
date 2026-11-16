@@ -37,6 +37,14 @@ build/test_amdc1: $(CM_SRC) tests/test_amdc1.cpp src/amdc1.hpp src/transforms.hp
 build/test_fast: $(FAST_SRC) tests/test_fast.cpp src/fast.hpp src/pagecache.hpp | build
 	$(CXX) $(CXXFLAGS) $(FAST_SRC) tests/test_fast.cpp -o $@
 
+READ_SRC := src/cm.cpp src/transforms.cpp src/container.cpp src/bwt.cpp src/bwtcodec.cpp src/fast.cpp src/solid.cpp
+build/amdcread: $(READ_SRC) src/amdcread.cpp | build
+	$(CXX) $(CXXFLAGS) $(READ_SRC) src/amdcread.cpp -o $@
+
+# end-to-end: archives from the real compressors, read back with amdcread (any file name, damaged input, output cap)
+test-reader: build/amdcread build/amdc1 build/amdcf build/amdcb build/amdcs
+	sh tests/test_amdcread.sh build
+
 build/test_capi: $(CAPI_SRC) tests/test_capi.c src/amdcf.h src/fast.hpp | build
 	$(CC) -std=c11 -Wall -Wextra -c tests/test_capi.c -o build/test_capi.o
 	$(CXX) $(CXXFLAGS) $(CAPI_SRC) build/test_capi.o -o $@

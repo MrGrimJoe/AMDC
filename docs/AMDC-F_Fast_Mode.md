@@ -327,3 +327,29 @@ has **not been run on GitHub yet**, and the Windows/MSVC job in particular is un
 Not done and not possible from here: kernel/OS-level integration (this is a library for pages your program owns, not a Windows or
 Linux memory compressor), measurement on your own game or application memory, measurement of the real Windows Xpress
 compressor and Linux lzo-rle, and the years of field use LZ4 and zstd have.
+
+## amdcread: one small reader for every AMDC-family file (new)
+
+`build/amdcread` (`make build/amdcread`) recognises AMDC, AMDF, AMDB and AMDS files by their magic bytes, whatever the file
+is called (`.amdc`, `.amdf`, no extension at all):
+
+    amdcread info FILE...        what each file is (AMDF also shows its decoded size)
+    amdcread test FILE...        decode and verify; sizes and ratio
+    amdcread view FILE [NAME]    first 512 decoded bytes as text or hex   (also: amdcread FILE)
+    amdcread cat  FILE [NAME]    decoded bytes to stdout; NAME picks a file inside an AMDS archive
+    amdcread ls   FILE           list an AMDS archive
+    amdcread scan [DIR...]       find AMDC-family files below DIR (default .), by content, not by name
+    -m MB                        refuse to decode more than MB megabytes (default 1024)
+
+It is read-only: it writes nothing but stdout, does not follow symlinks while scanning, and rejects damaged archives instead of
+returning wrong data. `scan` only searches the directories you name; to look through a whole drive give it the root
+(`amdcread scan /` or `amdcread scan C:\`), it does not crawl your system on its own. Tested end to end by
+`tests/test_amdcread.sh` (`make test-reader`) with archives made by the real compressors, plus 1,080 randomly damaged
+archives through an ASan/UBSan build (no crashes). Windows file associations (double-click opens it) are not set up.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push to `main` and on pull requests. Linux: builds the fast-mode tools, unit tests,
+`amdcread` end-to-end test, the Python reference-decoder interop check, ASan/UBSan, ThreadSanitizer and a 90-second fuzz run.
+Windows: CMake/MSVC build and the fast-mode tests. I ran every Linux step's commands locally and they pass; the workflow
+itself has not run on GitHub yet and the Windows job is untested.
