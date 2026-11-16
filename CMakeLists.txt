@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(amdc LANGUAGES CXX)
+project(amdc LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -31,7 +31,17 @@ add_executable(amdcs_cli src/solid_main.cpp)
 target_link_libraries(amdcs_cli amdcs)
 set_target_properties(amdcs_cli PROPERTIES OUTPUT_NAME amdcs)
 
+add_library(amdcb_lib STATIC src/bwt.cpp src/bwtcodec.cpp)     # BWT codec
+target_include_directories(amdcb_lib PUBLIC src)
+target_link_libraries(amdcb_lib PUBLIC Threads::Threads)
+
+add_executable(amdcread src/amdcread.cpp)                      # reader for AMDC / AMDF / AMDB / AMDS files
+target_link_libraries(amdcread amdcs amdc1lib amdcb_lib)
+
 enable_testing()
+add_executable(test_capi tests/test_capi.c)                    # the C header compiled as C
+target_link_libraries(test_capi amdcf)
+add_test(NAME capi COMMAND test_capi)
 add_executable(test_solid tests/test_solid.cpp)
 target_link_libraries(test_solid amdcs)
 add_test(NAME solid COMMAND test_solid)

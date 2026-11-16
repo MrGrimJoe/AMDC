@@ -20,6 +20,11 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #include "amdc1.hpp"
 #include "bwtcodec.hpp"
 #include "fast.hpp"
@@ -202,6 +207,9 @@ static int usage() {
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    _setmode(_fileno(stdout), _O_BINARY);   // `cat` writes raw bytes: no LF -> CRLF translation
+#endif
     std::vector<std::string> a;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "-m") && i + 1 < argc) g_max = uint64_t(std::strtoull(argv[++i], nullptr, 10)) << 20;

@@ -31,7 +31,26 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Configure and build (MSVC)
-        run: cmake -B build && cmake --build build --config Release --target test_fast amdcf
-      - name: Run fast-mode tests
-        run: ctest --test-dir build -C Release -R fast --output-on-failure
+      - name: Configure and build everything (MSVC)
+        run: cmake -B build && cmake --build build --config Release
+      - name: Unit tests (fast codec, solid archives, C interface)
+        run: ctest --test-dir build -C Release -R "fast|solid|capi" --output-on-failure
+      - name: amdcread smoke test on Windows (all formats, any file name)
+        shell: pwsh
+        run: |
+          $b = "build/Release"
+          1..400 | ForEach-Object { "line ${_}: the quick brown fox jumps over the lazy dog $($_ * 7919 % 1000)" } | Set-Content -Encoding ascii in.txt
+          & "$b/amdcf.exe" compress in.txt fast.noext
+          & "$b/amdc1.exe" compress -l 0 in.txt cm.weird
+          & "$b/amdcread.exe" scan . | Out-Host
+          foreach ($f in "fast.noext", "cm.weird") {
+            cmd /c "build\Release\amdcread.exe cat $f > out.bin"
+            & "$b/amdcread.exe" test $f
+            if ($LASTEXITCODE -ne 0) { throw "test failed for $f" }
+            $a = (Get-FileHash in.txt).Hash; $o = (Get-FileHash out.bin).Hash
+            if ($a -ne $o) { throw "decoded $f differs from the input" }
+          }
+          Set-Content -Path plain.txt -Value "not an archive"
+          & "$b/amdcread.exe" info plain.txt
+          if ($LASTEXITCODE -eq 0) { throw "plain text must not be accepted" }
+          $global:LASTEXITCODE = 0
