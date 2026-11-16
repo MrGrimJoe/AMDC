@@ -306,17 +306,17 @@ Totals over 731 MB, 4 KiB pages, one core (shared VM, +-15%):
 | zstd 1 | 23.7% | 361 | 876 |
 | zstd 3 | 23.1% | 302 | 928 |
 | amdcf level 5 | 27.4% | 193 | 1080 |
-| amdcf level 7 | 23.2% | 72 | 825 |
-| amdcf level 8 | **22.7%** | 61 | 855 |
+| amdcf level 7 | 23.2% | 87 | 852 |
+| amdcf level 8 | **22.8%** | 73 | 852 |
 
-Per file, levels 7/8 vs zstd 1 (size): compiler heap 14.6/14.6 vs 16.4; Chromium 5.1/4.8 vs 5.2; binaries 39.3/38.7 vs 39.6;
-libraries 43.2/41.9 vs 43.5; text 33.3/33.3 vs 34.1. Decode: faster than zstd 1 on the compiler heap and Chromium (1032 vs 709,
+Per file, levels 7/8 vs zstd 1 (size): compiler heap 14.7/14.7 vs 16.4; Chromium 5.2/4.8 vs 5.2; binaries 39.3/38.8 vs 39.6;
+libraries 43.2/41.9 vs 43.5; text 33.4/33.4 vs 34.1 (after the encoder tuning below). Decode: faster than zstd 1 on the compiler heap and Chromium (1032 vs 709,
 4009 vs 3350 MB/s) and **slower** on binaries, libraries and text (about 510-570 vs 570-650 MB/s). Honest summary: levels 7-8 are
 0.4-1.7 points smaller than zstd 1 on real data but compress 5x slower. Level 8's word transform adds only ~0.4 points over
 level 7 on real data (synthetic: ~2.5), mostly on libraries and binaries.
 
 Encoder tuning for the chained levels (4, 6, 7, 8): search depth 24 -> 12, no lazy match for matches >= 12 bytes, faster stepping
-through long literal runs: about 15% faster compression for 0.08 points of size.
+through long literal runs: about 20% faster compression (level 7: 72 -> 87 MB/s, level 8: 61 -> 73 MB/s on the table above) for 0.1 points of size.
 
 ## Verification and what is not verified
 
